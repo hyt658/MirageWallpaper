@@ -1001,6 +1001,7 @@ class WallpaperViewModel: PlaylistPlayback {
         opts.powerFps = throttledFps
         opts.loadFromMemory = (settings.wallpaperLoadSource ?? .disk) == .memory
         opts.enableHDRVideo = settings.shouldEnableHDRVideo
+        opts.shareVideoPlayback = w.kind == .video && settings.shouldShareVideoPlayback
         opts.enableMetalFX = settings.shouldEnableMetalFX
         switch settings.textureResolution {
         case .highQuality: opts.renderScale = 1.0

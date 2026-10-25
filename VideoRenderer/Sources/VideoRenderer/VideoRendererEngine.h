@@ -31,6 +31,11 @@ typedef struct {
 + (VRVideoEngineConfig)defaultConfig;
 
 - (instancetype)initWithFrame:(NSRect)frameRect config:(VRVideoEngineConfig)config;
+// A presentation owns its layer and layout, while the owner alone manages
+// playback, decoding, looping and recovery. Releasing it never pauses the owner.
+- (instancetype)initWithFrame:(NSRect)frameRect config:(VRVideoEngineConfig)config
+                playbackOwner:(nullable VRVideoRendererEngine *)owner;
+@property (nonatomic, readonly) BOOL presentationReady;
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
 - (BOOL)openWallpaper:(VRVideoManifest *)manifest error:(NSError **)error;

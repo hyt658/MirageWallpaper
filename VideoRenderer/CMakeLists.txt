@@ -93,5 +93,18 @@ if(VIDEORENDERER_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/Tests/VideoPositionIntegration.py
             $<TARGET_FILE:VideoPositionIntegration> ${VR_FFMPEG_EXECUTABLE})
         set_tests_properties(VideoPositionIntegration PROPERTIES TIMEOUT 75)
+        add_executable(SharedVideoPresentationRegression Tests/SharedVideoPresentationRegression.mm)
+        target_link_libraries(SharedVideoPresentationRegression PRIVATE VideoRendererEngine)
+        target_compile_options(SharedVideoPresentationRegression PRIVATE -Wno-deprecated-declarations)
+        add_test(NAME SharedVideoPresentationRegression COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/Tests/VideoPositionIntegration.py
+            $<TARGET_FILE:SharedVideoPresentationRegression> ${VR_FFMPEG_EXECUTABLE})
+        set_tests_properties(SharedVideoPresentationRegression PROPERTIES TIMEOUT 45)
+        if(VIDEORENDERER_BUILD_WALLPAPER)
+            add_test(NAME SharedVideoPlaybackIntegration COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/Tests/SharedVideoPlaybackIntegration.py
+                $<TARGET_FILE:VideoWallpaper> ${VR_FFMPEG_EXECUTABLE})
+            set_tests_properties(SharedVideoPlaybackIntegration PROPERTIES TIMEOUT 120)
+        endif()
     endif()
 endif()

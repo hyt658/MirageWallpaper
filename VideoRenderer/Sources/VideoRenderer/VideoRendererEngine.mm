@@ -105,6 +105,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 @interface VRVideoRendererEngine ()
+@property (nonatomic, strong) VRVideoRendererEngine *playbackOwner;
 @property (nonatomic, strong) AVQueuePlayer *player;
 @property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, strong) AVPlayerLooper *looper;
@@ -183,6 +184,11 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect config:(VRVideoEngineConfig)config {
+    return [self initWithFrame:frameRect config:config playbackOwner:nil];
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect config:(VRVideoEngineConfig)config
+                playbackOwner:(VRVideoRendererEngine *)owner {
     self = [super initWithFrame:frameRect];
     if (self) {
         self.wantsLayer = YES;
@@ -191,11 +197,14 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
         self.layer.masksToBounds = YES;
         self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawNever;
 
-        _player = [AVQueuePlayer queuePlayerWithItems:@[]];
-        _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
-        _player.automaticallyWaitsToMinimizeStalling = YES;
-        _player.volume = VRClampVolume(config.initialVolume);
-        _player.muted = config.muted;
+        _playbackOwner = owner;
+        _player = owner ? owner.player : [AVQueuePlayer queuePlayerWithItems:@[]];
+        if (!owner) {
+            _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
+            _player.automaticallyWaitsToMinimizeStalling = YES;
+            _player.volume = VRClampVolume(config.initialVolume);
+            _player.muted = config.muted;
+        }
 
         _playerLayer = [AVPlayerLayer playerLayerWithPlayer:_player];
         _playerLayer.frame = self.bounds;
@@ -226,6 +235,8 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
                      options:NSKeyValueObservingOptionInitial | NSKeyValueObservingOptionNew
                      context:kVRPresentationSizeContext];
         [self updateDynamicRangeForScreen:NSScreen.mainScreen];
+
+        if (owner) return self;
 
         // The player outlives every wallpaper this engine opens, so these two
         // registrations are made once here and torn down once in -dealloc.
@@ -259,6 +270,8 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
     }
     return self;
 }
+
+- (BOOL)presentationReady { return self.playerLayer.readyForDisplay; }
 
 - (BOOL)isFlipped {
     return YES;
@@ -297,6 +310,12 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 - (void)dealloc {
     [_player removeObserver:self forKeyPath:@"currentItem.presentationSize"
                    context:kVRPresentationSizeContext];
+    if (_playbackOwner) {
+        for (AVPlayerItem *item in _player.items) {
+            if (_snapshotOutput && [item.outputs containsObject:_snapshotOutput]) [item removeOutput:_snapshotOutput];
+        }
+        return;
+    }
     [_player removeObserver:self
                  forKeyPath:@"currentItem.status"
                     context:kVRCurrentItemStatusContext];

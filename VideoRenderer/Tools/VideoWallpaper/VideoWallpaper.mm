@@ -36,6 +36,7 @@ struct WallpaperArgs {
     BOOL deferredShow = NO;
     BOOL loadFromMemory = NO;
     BOOL hdrEnabled = NO;
+    BOOL sharedHost = NO;
 };
 
 // Orphan guard: if Mirage.app crashes or is force-quit, a renderer left behind
@@ -216,6 +217,8 @@ static BOOL ParseArgs(int argc, char **argv, WallpaperArgs &out) {
             out.displayID = (CGDirectDisplayID)value;
         } else if (strcmp(arg, "--volume") == 0) {
             const char *v = take(i, arg); if (!v) return NO; out.volume = strtof(v, nullptr);
+        } else if (strcmp(arg, "--shared-host") == 0) {
+            out.sharedHost = YES;
         } else if (strcmp(arg, "--muted") == 0) {
             out.muted = YES;
         } else if (strcmp(arg, "--fill") == 0) {
@@ -275,6 +278,10 @@ static BOOL ParseArgs(int argc, char **argv, WallpaperArgs &out) {
 @property (nonatomic, assign) BOOL deferredShow;
 @property (nonatomic, assign) BOOL prepared;
 @property (nonatomic, assign) NSUInteger visibilityEpoch;
+@property (nonatomic, assign) BOOL sharedPresentation;
+@property (nonatomic, copy) void (^eventHandler)(NSDictionary *);
+@property (nonatomic, copy) void (^disconnectHandler)(void);
+- (void)emitEvent:(NSDictionary *)event;
 - (void)observeScreenParameterChanges;
 - (void)contentDidBecomeReady;
 - (void)activateWindow;
@@ -285,6 +292,11 @@ static BOOL ParseArgs(int argc, char **argv, WallpaperArgs &out) {
 @end
 
 @implementation VideoWallpaperAppDelegate
+
+- (void)emitEvent:(NSDictionary *)event {
+    if (self.eventHandler) self.eventHandler(event);
+    else MirageEmitEvent(event);
+}
 
 static NSScreen *MirageScreenForDisplayID(CGDirectDisplayID displayID) {
     for (NSScreen *screen in NSScreen.screens) {
@@ -374,7 +386,7 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 - (void)confirmVisible:(BOOL)visible epoch:(NSUInteger)epoch attempts:(NSInteger)attempts {
     if (epoch != self.visibilityEpoch) return;
     if ([self visibleStateMatches:visible]) {
-        MirageEmitEvent(@{ @"event": visible ? @"activated" : @"deactivated" });
+        [self emitEvent:@{ @"event": visible ? @"activated" : @"deactivated" }];
         return;
     }
     if (attempts <= 0) {
@@ -391,8 +403,10 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 
 - (void)beginActivationFailureForEpoch:(NSUInteger)epoch {
     if (epoch != self.visibilityEpoch) return;
-    [self.engine setMuted:YES];
-    [self.engine pause];
+    if (!self.sharedPresentation) {
+        [self.engine setMuted:YES];
+        [self.engine pause];
+    }
     self.window.alphaValue = 0.0;
     [self.window orderOut:nil];
     [self confirmActivationFailureForEpoch:epoch attempts:200];
@@ -401,7 +415,7 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 - (void)confirmActivationFailureForEpoch:(NSUInteger)epoch attempts:(NSInteger)attempts {
     if (epoch != self.visibilityEpoch) return;
     if ([self visibleStateMatches:NO]) {
-        MirageEmitEvent(@{ @"event": @"activation-failed" });
+        [self emitEvent:@{ @"event": @"activation-failed" }];
         return;
     }
     if (attempts <= 0) return;
@@ -414,7 +428,7 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 - (void)contentDidBecomeReady {
     if (self.prepared) return;
     self.prepared = YES;
-    MirageEmitEvent(@{ @"event": @"prepared" });
+    [self emitEvent:@{ @"event": @"prepared" }];
 }
 
 - (void)activateWindow {
@@ -451,8 +465,10 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 - (void)deactivateWindow {
     self.visibilityEpoch += 1;
     NSUInteger epoch = self.visibilityEpoch;
-    [self.engine setMuted:YES];
-    [self.engine pause];
+    if (!self.sharedPresentation) {
+        [self.engine setMuted:YES];
+        [self.engine pause];
+    }
     self.window.alphaValue = 0.0;
     [self.window orderOut:nil];
     [self confirmVisible:NO epoch:epoch attempts:200];
@@ -476,7 +492,8 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
     NSScreen *screen = MirageScreenForDisplayID(self.displayID);
     if (screen == nil) {
         [self.window orderOut:nil];
-        [NSApp terminate:nil];
+        if (self.disconnectHandler) self.disconnectHandler();
+        else [NSApp terminate:nil];
         return;
     }
     [self.engine updateDynamicRangeForScreen:screen];
@@ -493,6 +510,387 @@ static BOOL MirageWindowServerState(NSWindow *window, CGRect *bounds,
 }
 @end
 
+// Shared video hosts keep transport/process ownership separate from each
+// desktop endpoint. All state below is confined to the AppKit main thread.
+@interface MirageSharedVideoSession : NSObject
+@property (nonatomic, strong) VRVideoRendererEngine *engine;
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, assign) VRVideoEngineConfig config;
+@property (nonatomic, assign) float speed;
+@property (nonatomic, assign) BOOL paused;
+@property (nonatomic, assign) BOOL ready;
+@property (nonatomic, assign) BOOL decoded;
+@property (nonatomic, assign) BOOL seekComplete;
+@property (nonatomic, assign) BOOL failed;
+@property (nonatomic, assign) double progress;
+@property (nonatomic, assign) BOOL transcoding;
+@end
+@implementation MirageSharedVideoSession
+@end
+
+@interface MirageSharedVideoEndpoint : NSObject
+@property (nonatomic, copy) NSString *token;
+@property (nonatomic, strong) VideoWallpaperAppDelegate *presentation;
+@property (nonatomic, strong) MirageSharedVideoSession *session;
+@property (nonatomic, strong) MirageSharedVideoSession *displayedSession;
+@property (nonatomic, strong) VRVideoRendererEngine *pendingView;
+@property (nonatomic, assign) VRVideoEngineConfig config;
+@property (nonatomic, assign) float speed;
+@property (nonatomic, assign) BOOL paused;
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, assign) BOOL visible;
+@property (nonatomic, assign) BOOL detaching;
+@property (nonatomic, assign) BOOL waitingForActivation;
+@property (nonatomic, assign) NSUInteger revision;
+@end
+@implementation MirageSharedVideoEndpoint
+@end
+
+@interface MirageSharedVideoHost : NSObject <NSApplicationDelegate>
+@property (nonatomic, strong) NSMutableDictionary<NSString *, MirageSharedVideoEndpoint *> *endpoints;
+@property (nonatomic, strong) NSMutableArray<MirageSharedVideoSession *> *sessions;
+@property (nonatomic, strong) MirageControlChannel *control;
+@property (nonatomic, strong) VRVideoManifest *manifest;
+@property (nonatomic, assign) BOOL reconcileScheduled;
+- (void)handleCommand:(NSDictionary *)command;
+@end
+
+@implementation MirageSharedVideoHost
+- (instancetype)init {
+    if ((self = [super init])) {
+        _endpoints = [NSMutableDictionary dictionary];
+        _sessions = [NSMutableArray array];
+    }
+    return self;
+}
+- (void)emit:(NSDictionary *)event token:(NSString *)token {
+    NSMutableDictionary *message = [event mutableCopy];
+    message[@"endpoint"] = token;
+    MirageEmitEvent(message);
+}
+- (void)broadcast:(NSDictionary *)event session:(MirageSharedVideoSession *)session activeOnly:(BOOL)activeOnly {
+    for (MirageSharedVideoEndpoint *endpoint in self.endpoints.allValues) {
+        if (endpoint.session == session && !endpoint.detaching && (!activeOnly || (endpoint.active && endpoint.visible && endpoint.displayedSession == session))) {
+            [self emit:event token:endpoint.token];
+        }
+    }
+}
+- (NSString *)keyForEndpoint:(MirageSharedVideoEndpoint *)endpoint {
+    VRVideoEngineConfig c = endpoint.config;
+    return [NSString stringWithFormat:@"%d/%a/%d/%a/%d", c.loadFromMemory,
+        (double)endpoint.speed, endpoint.paused, (double)c.initialVolume, c.muted];
+}
+- (void)refreshSessions {
+    for (MirageSharedVideoSession *session in self.sessions.copy) {
+        BOOL used = NO, playing = NO, preparing = NO, requested = NO;
+        for (MirageSharedVideoEndpoint *endpoint in self.endpoints.allValues) {
+            if (endpoint.session == session || endpoint.displayedSession == session) used = YES;
+            if (endpoint.session == session && !endpoint.detaching) {
+                requested = YES;
+                if (!endpoint.presentation.prepared || endpoint.pendingView) preparing = YES;
+            }
+            if (endpoint.displayedSession == session && endpoint.active && endpoint.visible && !endpoint.detaching) playing = YES;
+        }
+        if (!used) {
+            [session.engine setMuted:YES];
+            [session.engine pause];
+            [self.sessions removeObjectIdenticalTo:session];
+            continue;
+        }
+        if (!requested) {
+            [session.engine setMuted:YES];
+            [session.engine pause];
+            continue;
+        }
+        // Session policy is immutable. A queued endpoint edit must not briefly
+        // change the player still serving its siblings before regrouping.
+        [session.engine setVolume:session.config.initialVolume];
+        [session.engine setMuted:!playing || session.config.muted || session.paused];
+        [session.engine setPlaybackRate:session.speed];
+        if ((!session.ready && preparing) || (playing && !session.paused)) [session.engine play];
+        else [session.engine pause];
+    }
+}
+- (void)pollEndpoint:(MirageSharedVideoEndpoint *)endpoint revision:(NSUInteger)revision attempts:(NSInteger)attempts {
+    if (self.endpoints[endpoint.token] != endpoint || endpoint.detaching || endpoint.revision != revision) return;
+    MirageSharedVideoSession *session = endpoint.session;
+    if (session.failed) return;
+    VRVideoRendererEngine *view = endpoint.pendingView;
+    if (session.ready && view.presentationReady) {
+        [endpoint.presentation.engine removeFromSuperview];
+        view.hidden = NO;
+        endpoint.presentation.window.contentView = view;
+        endpoint.presentation.engine = view;
+        endpoint.pendingView = nil;
+        endpoint.displayedSession = session;
+        [endpoint.presentation normalizeGeometry];
+        [endpoint.presentation contentDidBecomeReady];
+        if (endpoint.waitingForActivation) {
+            endpoint.waitingForActivation = NO;
+            endpoint.active = YES;
+            [endpoint.presentation activateWindow];
+        }
+        [self refreshSessions];
+        return;
+    }
+    if (attempts <= 0) {
+        [self emit:@{ @"event": @"video-error", @"message": @"shared video presentation produced no frame" }
+              token:endpoint.token];
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        [self pollEndpoint:endpoint revision:revision attempts:attempts - 1];
+    });
+}
+- (MirageSharedVideoSession *)newSessionForEndpoint:(MirageSharedVideoEndpoint *)endpoint {
+    MirageSharedVideoSession *session = [MirageSharedVideoSession new];
+    session.key = [self keyForEndpoint:endpoint];
+    session.config = endpoint.config;
+    session.speed = endpoint.speed;
+    session.paused = endpoint.paused;
+    session.seekComplete = YES;
+    VRVideoEngineConfig config = endpoint.config;
+    config.muted = YES;
+    config.autoplay = YES;
+    session.engine = [[VRVideoRendererEngine alloc] initWithFrame:NSMakeRect(0, 0, 16, 16) config:config];
+    [self.sessions addObject:session];
+    __weak MirageSharedVideoHost *weakSelf = self;
+    __weak MirageSharedVideoSession *weakSession = session;
+    session.engine.firstFrameReadyBlock = ^{
+        MirageSharedVideoSession *s = weakSession;
+        s.decoded = YES;
+        s.ready = s.seekComplete;
+    };
+    session.engine.videoDidEndBlock = ^{
+        [weakSelf broadcast:@{ @"event": @"video-did-end" } session:weakSession activeOnly:YES];
+    };
+    session.engine.videoDidFailBlock = ^(NSString *message) {
+        MirageSharedVideoSession *s = weakSession;
+        s.failed = YES;
+        [weakSelf broadcast:@{ @"event": @"video-error", @"message": message ?: @"video playback failed" }
+                    session:s activeOnly:NO];
+    };
+    session.engine.videoTranscodeProgressBlock = ^(double fraction, BOOL done) {
+        MirageSharedVideoSession *s = weakSession;
+        s.progress = fraction;
+        s.transcoding = !done;
+        [weakSelf broadcast:@{ @"event": @"video-transcoding", @"progress": @(fraction), @"done": @(done) }
+                    session:s activeOnly:NO];
+    };
+    NSError *error = nil;
+    // Register the endpoint before open: failures can be delivered synchronously.
+    CMTime previousTime = endpoint.displayedSession.engine.player.currentTime;
+    endpoint.session = session;
+    if (![session.engine openWallpaper:self.manifest error:&error]) {
+        session.failed = YES;
+        [self emit:@{ @"event": @"video-error", @"message": error.localizedDescription ?: @"video could not be opened" }
+              token:endpoint.token];
+    } else if (CMTIME_IS_NUMERIC(previousTime) && CMTimeGetSeconds(previousTime) > 0) {
+        session.seekComplete = NO;
+        [session.engine.player seekToTime:previousTime toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+                       completionHandler:^(BOOL finished) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MirageSharedVideoSession *s = weakSession;
+                s.seekComplete = YES;
+                s.ready = s.decoded;
+            });
+        }];
+    }
+    return session;
+}
+- (void)reconcileEndpoint:(MirageSharedVideoEndpoint *)endpoint {
+    if (endpoint.detaching) return;
+    NSString *key = [self keyForEndpoint:endpoint];
+    if ([endpoint.session.key isEqualToString:key]) return;
+    MirageSharedVideoSession *session = nil;
+    for (MirageSharedVideoSession *candidate in self.sessions) {
+        if (!candidate.failed && [candidate.key isEqualToString:key]) { session = candidate; break; }
+    }
+    if (!session) session = [self newSessionForEndpoint:endpoint];
+    endpoint.session = session;
+    [endpoint.pendingView removeFromSuperview];
+    NSView *content = endpoint.presentation.window.contentView;
+    VRVideoRendererEngine *view = [[VRVideoRendererEngine alloc] initWithFrame:content.bounds
+        config:endpoint.config playbackOwner:session.engine];
+    endpoint.pendingView = view;
+    [content addSubview:view];
+    // Keep the old presentation visible until the replacement has its own frame.
+    view.hidden = endpoint.presentation.prepared;
+    __weak MirageSharedVideoHost *weakSelf = self;
+    NSString *token = endpoint.token;
+    view.positionAvailabilityBlock = ^(BOOL x, BOOL y) {
+        [weakSelf emit:@{ @"event": @"position-availability", @"x": @(x), @"y": @(y) } token:token];
+    };
+    endpoint.revision += 1;
+    [self pollEndpoint:endpoint revision:endpoint.revision attempts:15000];
+    if (session.transcoding) [self emit:@{ @"event": @"video-transcoding", @"progress": @(session.progress), @"done": @NO } token:token];
+}
+- (void)scheduleReconcile {
+    if (self.reconcileScheduled) return;
+    self.reconcileScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.reconcileScheduled = NO;
+        for (MirageSharedVideoEndpoint *endpoint in self.endpoints.allValues) [self reconcileEndpoint:endpoint];
+        [self refreshSessions];
+    });
+}
+- (void)finishDetach:(MirageSharedVideoEndpoint *)endpoint {
+    if (self.endpoints[endpoint.token] != endpoint) return;
+    endpoint.presentation.eventHandler = nil;
+    endpoint.presentation.disconnectHandler = nil;
+    [endpoint.presentation.window close];
+    [self.endpoints removeObjectForKey:endpoint.token];
+    [self emit:@{ @"event": @"detached" } token:endpoint.token];
+    [self refreshSessions];
+}
+- (void)attach:(NSDictionary *)command token:(NSString *)token {
+    if (self.endpoints[token]) return;
+    NSScreen *screen = MirageScreenForDisplayID([command[@"display"] unsignedIntValue]);
+    NSError *error = nil;
+    NSString *directory = [command[@"directory"] isKindOfClass:NSString.class] ? command[@"directory"] : nil;
+    VRVideoManifest *manifest = directory ? [VRVideoManifest loadFromDirectory:directory error:&error] : nil;
+    if (!screen || !manifest || (self.manifest && ![self.manifest.videoURL isEqual:manifest.videoURL])) {
+        [self emit:@{ @"event": @"video-error", @"message": error.localizedDescription ?: @"shared video target is unavailable" } token:token];
+        [self emit:@{ @"event": @"detached" } token:token];
+        return;
+    }
+    self.manifest = manifest;
+    MirageSharedVideoEndpoint *endpoint = [MirageSharedVideoEndpoint new];
+    endpoint.token = token;
+    endpoint.speed = fminf(2, fmaxf(0, [command[@"speed"] floatValue]));
+    endpoint.paused = [command[@"paused"] boolValue];
+    VRVideoEngineConfig config = [VRVideoRendererEngine defaultConfig];
+    config.initialVolume = [command[@"volume"] floatValue];
+    config.muted = [command[@"muted"] boolValue];
+    config.loadFromMemory = [command[@"memory"] boolValue];
+    config.hdrEnabled = [command[@"hdr"] boolValue];
+    if ([command[@"fill"] isKindOfClass:NSString.class]) ParseFillMode([command[@"fill"] UTF8String], config.fillMode);
+    config.positionX = [command[@"x"] doubleValue];
+    config.positionY = [command[@"y"] doubleValue];
+    endpoint.config = config;
+    VideoWallpaperAppDelegate *presentation = [VideoWallpaperAppDelegate new];
+    presentation.sharedPresentation = YES;
+    presentation.displayID = [command[@"display"] unsignedIntValue];
+    presentation.window = [[VideoWallpaperWindow alloc] initWithContentRect:screen.frame
+        styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO screen:screen];
+    NSWindow *window = presentation.window;
+    window.title = manifest.title;
+    window.level = CGWindowLevelForKey(kCGDesktopIconWindowLevelKey) - 1;
+    window.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle;
+    window.opaque = YES; window.backgroundColor = NSColor.blackColor;
+    window.alphaValue = 0; window.hasShadow = NO; window.ignoresMouseEvents = YES;
+    window.releasedWhenClosed = NO; window.canHide = NO;
+    endpoint.presentation = presentation;
+    self.endpoints[token] = endpoint;
+    __weak MirageSharedVideoHost *weakSelf = self;
+    __weak MirageSharedVideoEndpoint *weakEndpoint = endpoint;
+    presentation.eventHandler = ^(NSDictionary *event) {
+        MirageSharedVideoEndpoint *e = weakEndpoint;
+        if (!e) return;
+        if ([event[@"event"] isEqual:@"activated"]) {
+            e.visible = YES;
+            [weakSelf refreshSessions];
+        }
+        if ([event[@"event"] isEqual:@"activation-failed"]) {
+            e.visible = NO;
+            e.active = NO;
+            [weakSelf refreshSessions];
+        }
+        [weakSelf emit:event token:token];
+        if (e.detaching && [event[@"event"] isEqual:@"deactivated"]) [weakSelf finishDetach:e];
+    };
+    presentation.disconnectHandler = ^{
+        MirageSharedVideoEndpoint *e = weakEndpoint;
+        if (e) { e.detaching = YES; e.active = NO; [weakSelf finishDetach:e]; }
+    };
+    [presentation observeScreenParameterChanges];
+    [window orderFrontRegardless];
+    [self reconcileEndpoint:endpoint];
+    [self refreshSessions];
+}
+- (void)handleCommand:(NSDictionary *)command {
+    NSString *token = [command[@"endpoint"] isKindOfClass:NSString.class] ? command[@"endpoint"] : nil;
+    NSString *name = command[@"cmd"];
+    if (!token) return;
+    if ([name isEqual:@"attach"]) { [self attach:command token:token]; return; }
+    MirageSharedVideoEndpoint *endpoint = self.endpoints[token];
+    if (!endpoint) {
+        if ([name isEqual:@"detach"]) [self emit:@{ @"event": @"detached" } token:token];
+        return;
+    }
+    id value = command[@"value"];
+    VRVideoEngineConfig config = endpoint.config;
+    if ([name isEqual:@"detach"]) {
+        endpoint.detaching = YES; endpoint.active = NO; endpoint.visible = NO; endpoint.waitingForActivation = NO;
+        [self refreshSessions];
+        [endpoint.presentation deactivateWindow];
+        return;
+    }
+    if (endpoint.detaching) return;
+    if ([name isEqual:@"activate"]) {
+        [self reconcileEndpoint:endpoint];
+        if (endpoint.pendingView || !endpoint.presentation.prepared) endpoint.waitingForActivation = YES;
+        else { endpoint.active = YES; [self refreshSessions]; [endpoint.presentation activateWindow]; }
+        return;
+    }
+    if ([name isEqual:@"deactivate"]) {
+        endpoint.active = NO; endpoint.visible = NO; endpoint.waitingForActivation = NO;
+        [self refreshSessions]; [endpoint.presentation deactivateWindow]; return;
+    }
+    if ([name isEqual:@"power"]) endpoint.paused = [command[@"state"] isEqual:@"pause"];
+    else if ([name isEqual:@"pause"]) endpoint.paused = YES;
+    else if ([name isEqual:@"resume"] || [name isEqual:@"play"]) endpoint.paused = NO;
+    else if ([name isEqual:@"speed"] && [value isKindOfClass:NSNumber.class]) endpoint.speed = fminf(2, fmaxf(0, [value floatValue]));
+    else if ([name isEqual:@"volume"] && [value isKindOfClass:NSNumber.class]) config.initialVolume = fminf(1, fmaxf(0, [value floatValue]));
+    else if ([name isEqual:@"muted"] && [value isKindOfClass:NSNumber.class]) config.muted = [value boolValue];
+    else if ([name isEqual:@"fillmode"] && [value isKindOfClass:NSString.class]) ParseFillMode([value UTF8String], config.fillMode);
+    else if ([name isEqual:@"position"]) { config.positionX = [command[@"x"] doubleValue]; config.positionY = [command[@"y"] doubleValue]; }
+    else if ([name isEqual:@"hdr"] && [value isKindOfClass:NSNumber.class]) config.hdrEnabled = [value boolValue];
+    else if ([name isEqual:@"snapshot"]) {
+        NSString *path = command[@"path"], *request = command[@"token"];
+        if (![path isKindOfClass:NSString.class] || ![request isKindOfClass:NSString.class]) return;
+        [endpoint.presentation.engine takeSnapshotToPath:path completion:^(BOOL ok) {
+            [self emit:@{ @"event": @"snapshot-done", @"token": request, @"ok": @(ok) } token:token];
+        }];
+        return;
+    } else if ([name isEqual:@"shared-status"]) {
+        double time = CMTimeGetSeconds(endpoint.session.engine.player.currentTime);
+        if (!std::isfinite(time)) time = 0;
+        [self emit:@{ @"event": @"shared-status", @"sessions": @(self.sessions.count),
+            @"endpoints": @(self.endpoints.count), @"ready": @(endpoint.presentation.engine.presentationReady),
+            @"pending": @(self.reconcileScheduled || endpoint.pendingView != nil),
+            @"time": @(time), @"muted": @(endpoint.session.engine.player.muted),
+            @"paused": @(endpoint.session.engine.player.rate == 0) } token:token];
+        return;
+    }
+    endpoint.config = config;
+    VRVideoRendererEngine *views[] = { endpoint.presentation.engine, endpoint.pendingView };
+    for (VRVideoRendererEngine *view : views) {
+        if (!view) continue;
+        [view setFillMode:config.fillMode]; [view setPositionX:config.positionX y:config.positionY];
+        [view setHDREnabled:config.hdrEnabled];
+    }
+    [self scheduleReconcile];
+}
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    for (MirageSharedVideoSession *session in self.sessions) { [session.engine setMuted:YES]; [session.engine pause]; }
+}
+@end
+
+static int MirageRunSharedVideoHost(void) {
+    NSApplication *app = NSApplication.sharedApplication;
+    [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    MirageSharedVideoHost *host = [MirageSharedVideoHost new];
+    app.delegate = host;
+    [app finishLaunching];
+    host.control = [[MirageControlChannel alloc] initWithHandler:^(NSDictionary *command) {
+        [host handleCommand:command];
+    } onEOF:^{ [NSApp terminate:nil]; }];
+    [host.control start];
+    [app run];
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         WallpaperArgs args;
@@ -500,6 +898,7 @@ int main(int argc, char *argv[]) {
 
         MirageStartParentWatchdog();
         MirageMakeStdoutNonBlocking();
+        if (args.sharedHost) return MirageRunSharedVideoHost();
 
         NSError *manifestError = nil;
         VRVideoManifest *manifest = [VRVideoManifest loadFromDirectory:@(args.workshop)

@@ -151,6 +151,12 @@ struct PerformancePage: SettingsPage {
             }
 
             Section {
+                Toggle("同视频共享播放", isOn: Binding(
+                    get: { viewModel.settings.shouldShareVideoPlayback },
+                    set: { viewModel.settings.shareVideoPlayback = $0 }
+                ))
+                Text("切换壁纸后生效。同一视频与兼容播放设置的显示器共享播放进度和声音，以减少内存占用；不同播放设置会自动使用独立会话。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("启用 HDR 视频", isOn: Binding(
                     get: { viewModel.settings.shouldEnableHDRVideo },
                     set: {

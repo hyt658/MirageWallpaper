@@ -184,6 +184,10 @@ struct GlobalSettings: Codable, Equatable {
     // MARK: Video
     var videoFramework = GSVideoFramework.avkit
     var enableHDRVideo: Bool? = false
+    // Optional so settings saved before shared video playback remain decodable.
+    var shareVideoPlayback: Bool? = false
+
+    var shouldShareVideoPlayback: Bool { shareVideoPlayback ?? false }
 
     var shouldEnableHDRVideo: Bool {
         enableHDRVideo ?? false

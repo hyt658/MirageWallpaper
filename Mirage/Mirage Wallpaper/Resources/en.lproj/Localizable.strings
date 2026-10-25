@@ -1348,3 +1348,7 @@
 "自适应" = "Adaptive";
 
 "优先使用动画或视频周期；无法识别周期时使用 30 秒。" = "Use the animation or video cycle when available; otherwise use 30 seconds.";
+
+/* Shared video playback */
+"同视频共享播放" = "Share playback of the same video";
+"切换壁纸后生效。同一视频与兼容播放设置的显示器共享播放进度和声音，以减少内存占用；不同播放设置会自动使用独立会话。" = "Takes effect when switching wallpapers. Displays using the same video and compatible playback settings share playback progress and audio to reduce memory use. Different playback settings automatically use separate sessions.";

@@ -41,6 +41,22 @@ final class RendererProcess {
     let displayID: CGDirectDisplayID
     let generation: UInt64
     var launchOptions: RenderOptions
+    let sharedVideoHost: SharedVideoProcess?
+    let endpointID = UUID().uuidString
+    private var endpointExited = false
+
+    var isRunning: Bool {
+        stateLock.lock()
+        let exited = endpointExited
+        stateLock.unlock()
+        return !exited && process.isRunning
+    }
+
+    func markEndpointExited() {
+        stateLock.lock()
+        endpointExited = true
+        stateLock.unlock()
+    }
     var assignmentID: UUID?
     var desiredVolume: Float
     var desiredMuted: Bool
@@ -108,8 +124,9 @@ final class RendererProcess {
     init(process: Process, stdinPipe: Pipe, stdoutPipe: Pipe?, stderrPipe: Pipe,
          wallpaper: WEWallpaper, displayID: CGDirectDisplayID, generation: UInt64,
          options: RenderOptions,
-         spectrumEnabled: Bool) {
+         spectrumEnabled: Bool, sharedVideoHost: SharedVideoProcess? = nil) {
         self.process = process
+        self.sharedVideoHost = sharedVideoHost
         self.stdinPipe = stdinPipe
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
@@ -131,17 +148,22 @@ final class RendererProcess {
         self.desiredUserProperties = options.userProperties
         self.spectrumEnabled = spectrumEnabled
         self.spectrumDemanded = false
-        setUpWriter()
+        if sharedVideoHost == nil { setUpWriter() }
     }
 
     deinit {
         // A suspended dispatch source must never be released, so the writer is
         // always torn down explicitly — including for handles that are dropped
         // without ever having been stopped.
-        closeWriter()
+        if sharedVideoHost == nil { closeWriter() }
     }
 
     func send(_ command: [String: Any]) {
+        if let sharedVideoHost {
+            guard !isTerminated, isRunning else { return }
+            sharedVideoHost.send(command, endpoint: endpointID)
+            return
+        }
         enqueue(command, allowAfterStop: false)
     }
 
@@ -391,6 +413,20 @@ final class RendererProcess {
         pendingSpectrum = nil
         spectrumStateLock.unlock()
 
+        if let sharedVideoHost {
+            sharedVideoHost.send(["cmd": "detach"], endpoint: endpointID)
+            // A stuck endpoint cannot be left covering the desktop. Escalate
+            // only if its hidden/detached acknowledgement never arrives.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self, self.isRunning else { return }
+                self.forceTerminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self, self.isRunning else { return }
+                    self.forceKill()
+                }
+            }
+            return
+        }
         if !alreadyDeactivated {
             enqueue(["cmd": "deactivate"], allowAfterStop: true)
         }
@@ -417,12 +453,12 @@ final class RendererProcess {
 
     /// SIGTERM. Safe to call on an already dead renderer.
     func forceTerminate() {
-        guard process.isRunning else { return }
+        guard isRunning else { return }
         process.terminate()
     }
 
     func forceKill() {
-        guard process.isRunning else { return }
+        guard isRunning else { return }
         let pid = process.processIdentifier
         guard pid > 0 else { return }
         kill(pid, SIGKILL)
@@ -430,6 +466,7 @@ final class RendererProcess {
     }
 
     func startReadingOutput(onEvent: @escaping ([String: Any]) -> Void) {
+        precondition(sharedVideoHost == nil)
         stdoutPipe?.fileHandleForReading.readabilityHandler = { [weak self] file in
             let data = file.availableData
             if data.isEmpty {
@@ -479,9 +516,13 @@ final class RendererProcess {
         tempFiles.removeAll()
         cleanupLock.unlock()
 
-        closeWriter()
-        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        if sharedVideoHost == nil {
+            closeWriter()
+            stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+        } else {
+            markEndpointExited()
+        }
         for url in files {
             try? FileManager.default.removeItem(at: url)
         }
@@ -502,6 +543,7 @@ struct RenderOptions: Equatable {
     var msaaSamples: Int = 1
     var loadFromMemory: Bool = false
     var enableHDRVideo: Bool = false
+    var shareVideoPlayback: Bool = false
     var userProperties: [String: WEProjectProperty] = [:]
     var scriptStorage: [String: String]? = nil
     var powerState: MiragePowerState = .run
@@ -513,6 +555,141 @@ struct RenderOptions: Equatable {
 }
 
 // Subprocess control: the renderer receives JSON-line commands via stdin.
+/// One physical video process and one pipe writer, serving independently owned
+/// desktop endpoints. Detaching an endpoint does not close the shared pipe.
+final class SharedVideoProcess {
+    struct Key: Hashable {
+        let source: String
+        let size: Int?
+        let modified: Date?
+        let binary: String
+        let developerMode: Bool
+
+        init(wallpaper: WEWallpaper, binary: URL, options: RenderOptions) {
+            let source = wallpaper.resolvedEntryURL.resolvingSymlinksInPath().standardizedFileURL
+            let values = try? source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            self.source = source.path
+            size = values?.fileSize
+            modified = values?.contentModificationDate
+            self.binary = binary.path
+            developerMode = options.developerModeEnabled
+        }
+    }
+
+    let transport: RendererProcess
+    private let lock = NSLock()
+    private let callbackQueue: DispatchQueue
+    private var accepting = true
+    private var endpoints: [String: RendererProcess] = [:]
+    private let onEvent: (RendererProcess, [String: Any]) -> Void
+    private let onExit: (RendererProcess, Int32) -> Void
+    private let onClose: (SharedVideoProcess) -> Void
+
+    var canAttach: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accepting && transport.process.isRunning
+    }
+
+    init(binary: URL, wallpaper: WEWallpaper, options: RenderOptions, callbackQueue: DispatchQueue,
+         onEvent: @escaping (RendererProcess, [String: Any]) -> Void,
+         onExit: @escaping (RendererProcess, Int32) -> Void,
+         onClose: @escaping (SharedVideoProcess) -> Void) {
+        let process = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
+        process.executableURL = binary
+        process.arguments = [wallpaper.renderDirectory.path, "--shared-host", "--control-stdin"]
+        var environment = ProcessInfo.processInfo.environment
+        if options.developerModeEnabled { environment["WR_DEBUG"] = "1" }
+        process.environment = environment
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        transport = RendererProcess(process: process, stdinPipe: input, stdoutPipe: output,
+            stderrPipe: errors, wallpaper: wallpaper, displayID: 0, generation: 0,
+            options: options, spectrumEnabled: false)
+        self.callbackQueue = callbackQueue
+        self.onEvent = onEvent
+        self.onExit = onExit
+        self.onClose = onClose
+        process.terminationHandler = { [weak self] process in
+            process.terminationHandler = nil
+            let status = process.terminationStatus
+            self?.callbackQueue.async { [weak self] in self?.didExit(status: status) }
+        }
+    }
+
+    func start() throws {
+        transport.startReadingOutput { [weak self] event in
+            self?.callbackQueue.async { [weak self] in self?.receive(event) }
+        }
+        do { try transport.process.run() }
+        catch {
+            transport.process.terminationHandler = nil
+            transport.cleanupAfterExit()
+            throw error
+        }
+    }
+
+    func attach(_ handle: RendererProcess, options: RenderOptions) {
+        lock.lock()
+        endpoints[handle.endpointID] = handle
+        lock.unlock()
+        send(["cmd": "attach", "display": handle.displayID,
+              "directory": handle.wallpaper.renderDirectory.path,
+              "speed": options.speed, "paused": options.powerState == .pause,
+              "volume": options.volume, "muted": options.muted,
+              "memory": options.loadFromMemory, "hdr": options.enableHDRVideo,
+              "fill": options.fillMode.rawValue, "x": options.position.x, "y": options.position.y],
+             endpoint: handle.endpointID)
+    }
+
+    func send(_ command: [String: Any], endpoint: String) {
+        var scoped = command
+        scoped["endpoint"] = endpoint
+        transport.send(scoped)
+    }
+
+    private func receive(_ event: [String: Any]) {
+        guard let token = event["endpoint"] as? String else { return }
+        lock.lock()
+        let handle = endpoints[token]
+        let detached = event["event"] as? String == "detached"
+        if detached { endpoints[token] = nil }
+        let close = detached && endpoints.isEmpty && accepting
+        if close { accepting = false }
+        lock.unlock()
+        if let handle {
+            if detached {
+                handle.markEndpointExited()
+                handle.cleanupAfterExit()
+                onExit(handle, handle.isTerminated ? 0 : 1)
+            } else {
+                onEvent(handle, event)
+            }
+        }
+        if close {
+            transport.stop(alreadyDeactivated: true)
+            onClose(self)
+        }
+    }
+
+    private func didExit(status: Int32) {
+        lock.lock()
+        let notifyClose = accepting
+        accepting = false
+        let handles = Array(endpoints.values)
+        endpoints.removeAll()
+        lock.unlock()
+        transport.cleanupAfterExit()
+        for handle in handles {
+            handle.markEndpointExited()
+            handle.cleanupAfterExit()
+            onExit(handle, status)
+        }
+        if notifyClose { onClose(self) }
+    }
+}
+
 final class RendererController {
     var onPositionAvailabilityChanged: ((CGDirectDisplayID) -> Void)?
     var onScriptStorageChanged: ((CGDirectDisplayID, String, UUID?, [String: String]) -> Void)?
@@ -594,6 +771,7 @@ final class RendererController {
         var options: RenderOptions
     }
 
+    private var sharedVideoHosts: [SharedVideoProcess.Key: SharedVideoProcess] = [:]
     private var running: [CGDirectDisplayID: RendererProcess] = [:] { didSet { updateQuerySnapshotLocked() } }
     private var candidates: [CGDirectDisplayID: RendererProcess] = [:] { didSet { updateQuerySnapshotLocked() } }
     private var transitions: [CGDirectDisplayID: ReplacementTransition] = [:] { didSet { updateQuerySnapshotLocked() } }
@@ -682,7 +860,7 @@ final class RendererController {
     private func updateQuerySnapshotLocked() {
         var snapshot = QuerySnapshot()
         snapshot.wallpapers = running.mapValues(\.wallpaper)
-        snapshot.rendering = Set(running.compactMap { $0.value.process.isRunning ? $0.key : nil })
+        snapshot.rendering = Set(running.compactMap { $0.value.isRunning ? $0.key : nil })
         snapshot.coverage = Set(running.keys).union(candidates.keys).union(transitions.keys)
             .union(pendingRequests.keys).union(launchingRequests.keys)
             .union(visibilityBlockers.values.map(\.displayID))
@@ -692,7 +870,7 @@ final class RendererController {
             transitions.values.compactMap(\.standby) + Array(visibilityBlockers.values) +
             Array(awaitingVisibleExits.values) + Array(retiring.values) + previewProcesses.values.map(\.handle)
         snapshot.processIDs = Set(handles.compactMap {
-            $0.process.isRunning ? $0.process.processIdentifier : nil
+            $0.isRunning ? $0.process.processIdentifier : nil
         })
         queryLock.lock()
         querySnapshot = snapshot
@@ -954,7 +1132,7 @@ final class RendererController {
         queryLock.lock()
         previewRequests.removeValue(forKey: token)
         queryLock.unlock()
-        if preview.handle.process.isRunning {
+        if preview.handle.isRunning {
             retiring[ObjectIdentifier(preview.handle)] = preview.handle
         }
         preview.handle.stop(alreadyDeactivated: true)
@@ -1192,7 +1370,7 @@ final class RendererController {
             if let transition = transitions[displayID],
                let candidate = candidates[displayID],
                transition.candidate === candidate {
-                if candidate.process.isRunning,
+                if candidate.isRunning,
                    candidate.wallpaper.id == wallpaper.id,
                    canReuseCandidateLocked(candidate, with: options),
                    transition.phase == .preparing ||
@@ -1224,13 +1402,14 @@ final class RendererController {
                 transitions[displayID] = nil
                 canceledCandidate = candidate
                 canceledCompletions = takeTransitionCompletionsLocked(from: candidate)
-                if candidate.process.isRunning {
+                if candidate.isRunning {
                     retiring[ObjectIdentifier(candidate)] = candidate
                 }
             }
 
-            if reuseActive, let active = running[displayID], active.process.isRunning,
-               active.wallpaper.id == wallpaper.id {
+            if reuseActive, let active = running[displayID], active.isRunning,
+               active.wallpaper.id == wallpaper.id,
+               active.launchOptions.shareVideoPlayback == options.shareVideoPlayback {
                 updateDesiredStateLocked(active, from: options)
                 reusedActive = true
             }
@@ -1277,7 +1456,7 @@ final class RendererController {
             if let supersededCandidate {
                 supersededCompletions = takeTransitionCompletionsLocked(
                     from: supersededCandidate)
-                if supersededCandidate.process.isRunning {
+                if supersededCandidate.isRunning {
                     retiring[ObjectIdentifier(supersededCandidate)] = supersededCandidate
                 }
             }
@@ -1289,6 +1468,12 @@ final class RendererController {
         }
         supersededCandidate?.stop(alreadyDeactivated: true)
         dispatchTransitionCompletions(supersededCompletions, success: false)
+
+        if wallpaper.kind == .video && options.shareVideoPlayback {
+            return launchSharedVideo(wallpaper, onDisplay: displayID, options: options,
+                binary: binary, generation: generation, requestToken: requestToken,
+                leaseID: leaseID, completion: completion)
+        }
 
         let proc = Process()
         proc.executableURL = binary
@@ -1488,12 +1673,67 @@ final class RendererController {
         return true
     }
 
+    private func launchSharedVideo(_ wallpaper: WEWallpaper, onDisplay displayID: CGDirectDisplayID,
+                                   options: RenderOptions, binary: URL, generation: UInt64,
+                                   requestToken: UUID, leaseID: UUID,
+                                   completion: ((Bool) -> Void)?) -> Bool {
+        let key = SharedVideoProcess.Key(wallpaper: wallpaper, binary: binary, options: options)
+        var launchedHandle: RendererProcess?
+        let accepted = queue.sync {
+            guard isCurrentSubmission(requestToken, on: displayID), generations[displayID] == generation,
+                  latestRequestTokens[displayID] == requestToken,
+                  launchingRequests[displayID]?.requestToken == requestToken,
+                  launchingRequests[displayID]?.leaseID == leaseID,
+                  transitions[displayID] == nil else { return false }
+            let host: SharedVideoProcess
+            if let existing = sharedVideoHosts[key], existing.canAttach {
+                host = existing
+            } else {
+                host = SharedVideoProcess(binary: binary, wallpaper: wallpaper, options: options, callbackQueue: queue,
+                    onEvent: { [weak self] handle, event in
+                        self?.handleLifecycleEvent(event, from: handle)
+                    }, onExit: { [weak self] handle, status in
+                        self?.queue.async { [weak self] in self?.handleProcessExitLocked(handle, status: status) }
+                    }, onClose: { [weak self] host in
+                        self?.queue.async { [weak self] in
+                            guard let self, self.sharedVideoHosts[key] === host else { return }
+                            self.sharedVideoHosts[key] = nil
+                        }
+                    })
+                do { try host.start() }
+                catch {
+                    NSLog("[Mirage] 共享视频进程启动失败: \(error)")
+                    return false
+                }
+                guard host.canAttach else { return false }
+                sharedVideoHosts[key] = host
+            }
+            let registeredOptions = launchingRequests[displayID]?.options ?? options
+            let physical = host.transport
+            let handle = RendererProcess(process: physical.process, stdinPipe: physical.stdinPipe,
+                stdoutPipe: nil, stderrPipe: physical.stderrPipe, wallpaper: wallpaper,
+                displayID: displayID, generation: generation, options: registeredOptions,
+                spectrumEnabled: false, sharedVideoHost: host)
+            if let completion { handle.transitionCompletions.append(completion) }
+            candidates[displayID] = handle
+            transitions[displayID] = ReplacementTransition(candidate: handle, generation: generation)
+            host.attach(handle, options: registeredOptions)
+            launchedHandle = handle
+            schedulePreparationTimeoutLocked(transitions[displayID]!)
+            return true
+        }
+        if !accepted { dispatchTransitionCompletions(completion.map { [$0] } ?? [], success: false) }
+        if launchedHandle != nil { refreshAudioSpectrumService() }
+        return accepted
+    }
+
     /// Only settings that require a new renderer process participate here.
     /// Volume, pause, frame rate, speed and fill mode are replayed at activation.
     private func canReuseCandidateLocked(_ candidate: RendererProcess,
                                          with options: RenderOptions) -> Bool {
         let launched = candidate.launchOptions
-        return launched.enableSpectrum == options.enableSpectrum &&
+        return launched.shareVideoPlayback == options.shareVideoPlayback &&
+            launched.enableSpectrum == options.enableSpectrum &&
             launched.renderScale == options.renderScale &&
             launched.enableMetalFX == options.enableMetalFX &&
             launched.msaaSamples == options.msaaSamples &&
@@ -1713,7 +1953,7 @@ final class RendererController {
         guard transitions[displayID] === transition,
               candidates[displayID] === transition.candidate,
               transition.phase == .preparing,
-              transition.candidate.process.isRunning else { return }
+              transition.candidate.isRunning else { return }
         transition.prepared = true
 
         if hasVisibilityBlockersLocked(for: displayID) {
@@ -1722,7 +1962,7 @@ final class RendererController {
         }
 
         if let active = running[displayID] {
-            if active.process.isRunning {
+            if active.isRunning {
                 transition.phase = .deactivatingActive
                 active.send(["cmd": "deactivate"])
                 scheduleDeactivationTimeoutLocked(transition, active: active)
@@ -1757,7 +1997,7 @@ final class RendererController {
             transition.phase = .waitingForVisibilityBlockers
             return
         }
-        guard candidate.process.isRunning else {
+        guard candidate.isRunning else {
             candidateExitedLocked(transition)
             return
         }
@@ -1789,7 +2029,7 @@ final class RendererController {
         guard transitions[displayID] === transition,
               candidates[displayID] === candidate,
               transition.phase == .activatingCandidate else { return }
-        guard candidate.process.isRunning else {
+        guard candidate.isRunning else {
             candidateExitedLocked(transition)
             return
         }
@@ -1844,7 +2084,7 @@ final class RendererController {
         let displayID = candidate.displayID
         guard transitions[displayID] === transition,
               transition.phase == .activatingCandidate else { return }
-        guard candidate.process.isRunning else {
+        guard candidate.isRunning else {
             transition.candidateKnownHidden = true
             beginStandbyRestoreLocked(transition, reason: reason)
             return
@@ -1870,7 +2110,7 @@ final class RendererController {
         let displayID = transition.candidate.displayID
         guard transitions[displayID] === transition,
               transition.candidateKnownHidden ||
-                !transition.candidate.process.isRunning else { return }
+                !transition.candidate.isRunning else { return }
         // Blockers are created only by removeDisplayStateLocked(), which also
         // removes the transition and its standby. A live transition restoring a
         // standby must therefore never coexist with a stop blocker.
@@ -1880,7 +2120,7 @@ final class RendererController {
             finishTransitionFailureLocked(transition, reason: reason)
             return
         }
-        guard standby.process.isRunning else {
+        guard standby.isRunning else {
             transition.standby = nil
             awaitVisibleExitLocked(standby)
             finishTransitionFailureLocked(transition, reason: reason)
@@ -1903,7 +2143,7 @@ final class RendererController {
         guard transitions[displayID] === transition,
               transition.standby === standby,
               transition.phase == .restoringStandby else { return }
-        guard standby.process.isRunning else {
+        guard standby.isRunning else {
             transition.standby = nil
             awaitVisibleExitLocked(standby)
             finishTransitionFailureLocked(transition, reason: "standby-exited")
@@ -1924,7 +2164,7 @@ final class RendererController {
         guard transitions[displayID] === transition,
               transition.phase == .restoringStandby,
               let standby = transition.standby else { return }
-        guard standby.process.isRunning else {
+        guard standby.isRunning else {
             transition.standby = nil
             awaitVisibleExitLocked(standby)
             finishTransitionFailureLocked(transition, reason: reason)
@@ -1957,13 +2197,13 @@ final class RendererController {
         let candidate = transition.candidate
         let displayID = candidate.displayID
         guard transitions[displayID] === transition else { return }
-        guard transition.candidateKnownHidden || !candidate.process.isRunning else {
+        guard transition.candidateKnownHidden || !candidate.isRunning else {
             NSLog("[Mirage] 拒绝在候选可见性未确认时回滚 (显示器=\(displayID))")
             return
         }
         transitions[displayID] = nil
         if candidates[displayID] === candidate { candidates[displayID] = nil }
-        if candidate.process.isRunning {
+        if candidate.isRunning {
             retireLocked(candidate, alreadyDeactivated: true)
         }
         let completions = takeTransitionCompletionsLocked(from: candidate)
@@ -1998,7 +2238,7 @@ final class RendererController {
     @discardableResult
     private func retireLocked(_ handle: RendererProcess,
                               alreadyDeactivated: Bool) -> Bool {
-        guard handle.process.isRunning else { return false }
+        guard handle.isRunning else { return false }
         retiring[ObjectIdentifier(handle)] = handle
         handle.stop(alreadyDeactivated: alreadyDeactivated)
         return true
@@ -2145,7 +2385,7 @@ final class RendererController {
     private func visibilityBlockerBecameHiddenLocked(_ handle: RendererProcess) {
         let identity = ObjectIdentifier(handle)
         guard visibilityBlockers.removeValue(forKey: identity) === handle else { return }
-        if handle.process.isRunning {
+        if handle.isRunning {
             // `stop()` was already issued when the role became a blocker. Keep
             // ownership until its termination handler arrives, without sending
             // a second command or relying on stop()'s idempotent early return.
@@ -2312,7 +2552,7 @@ final class RendererController {
         if !detachProcessOwnership {
             for handle in handles {
                 let identity = ObjectIdentifier(handle)
-                if handle.process.isRunning {
+                if handle.isRunning {
                     visibilityBlockers[identity] = handle
                 } else {
                     // Foundation may queue the termination handler after
@@ -2506,6 +2746,9 @@ final class RendererController {
                 result.append(contentsOf: state.0)
                 completions.append(contentsOf: state.1)
             }
+            let transports = Dictionary(grouping: result.compactMap { $0.sharedVideoHost?.transport },
+                                        by: { ObjectIdentifier($0) }).values.compactMap(\.first)
+            result.append(contentsOf: transports)
             return (result, completions)
         }
         dispatchTransitionCompletions(transitionCompletions, success: false)
@@ -2530,12 +2773,12 @@ final class RendererController {
     /// time as one. Returns the handles that are still alive at the deadline.
     private static func waitForExit(_ handles: [RendererProcess],
                                     timeout: TimeInterval) -> [RendererProcess] {
-        var alive = handles.filter { $0.process.isRunning }
+        var alive = handles.filter { $0.isRunning }
         guard !alive.isEmpty else { return [] }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             usleep(20_000)
-            alive = alive.filter { $0.process.isRunning }
+            alive = alive.filter { $0.isRunning }
             if alive.isEmpty { return [] }
         }
         return alive
@@ -2564,7 +2807,7 @@ final class RendererController {
     }
 
     private func coverageOrWorkSettledLocked(_ displayID: CGDirectDisplayID) -> Bool {
-        running[displayID]?.process.isRunning == true ||
+        running[displayID]?.isRunning == true ||
             !hasCoverageOrWorkLocked(displayID)
     }
 
@@ -2762,14 +3005,14 @@ final class RendererController {
 
     private func needsSpectrum(_ process: RendererProcess) -> Bool {
         process.spectrumEnabled && process.spectrumDemanded &&
-            !process.desiredPaused && process.process.isRunning
+            !process.desiredPaused && process.isRunning
     }
 
     private func refreshAudioSpectrumService() {
         let state = queue.sync {
             let spectrum = hasSpectrumConsumersLocked()
             let media = targetsLocked(nil, includeCandidates: true).contains {
-                $0.wallpaper.kind == .scene && $0.process.isRunning
+                $0.wallpaper.kind == .scene && $0.isRunning
             }
             return (spectrum, media)
         }
