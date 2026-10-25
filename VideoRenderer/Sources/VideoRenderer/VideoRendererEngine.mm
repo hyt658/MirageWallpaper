@@ -142,6 +142,11 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 @property (nonatomic, assign) BOOL everProducedFrame;
 @property (nonatomic, assign) NSInteger recoveryAttempts;
 @property (nonatomic, assign) BOOL recoveryScheduled;
+@property (nonatomic, assign) BOOL systemSleeping;
+// Keep the target until its frame is decoded, including across interrupted recovery.
+@property (nonatomic, assign) CMTime resumeTime;
+@property (nonatomic, assign) BOOL resumeSeekStarted;
+@property (nonatomic, assign) BOOL resumeSeekCompleted;
 @property (nonatomic, strong) NSMutableArray<id> *systemPowerObservers;
 @property (nonatomic, strong) dispatch_source_t playbackHealthTimer;
 @property (nonatomic, assign) double lastPlaybackTime;
@@ -156,10 +161,13 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 - (BOOL)startPlaybackOfURL:(NSURL *)url error:(NSError **)error;
 - (void)armFirstFrameWatchdogForGeneration:(uint64_t)generation deadline:(NSDate *)deadline;
 - (void)applyPlaybackState;
+- (void)applyAudioState;
+- (void)restorePlaybackTimeIfNeeded;
 - (void)scheduleRecovery;
 - (void)teardownPlaybackForRestart;
 - (BOOL)canRecoverFromError:(nullable NSError *)error;
 - (void)observeSystemPowerTransitions;
+- (void)handleSystemWillSleep;
 - (void)handleSystemDidWake;
 - (void)verifyPlaybackAfterWakeForGeneration:(uint64_t)generation
                                 attemptsLeft:(NSInteger)attemptsLeft;
@@ -222,6 +230,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
         _hdrEnabled = config.hdrEnabled;
         _itemEndObservers = [NSMutableArray array];
         _systemPowerObservers = [NSMutableArray array];
+        _resumeTime = kCMTimeInvalid;
         _lastPlaybackTime = NAN;
         _lastLoopCount = NSNotFound;
         _transcodeQueue = dispatch_queue_create("VideoRenderer.transcode",
@@ -362,6 +371,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (void)reportPlaybackFailure:(NSError *)error fallback:(NSString *)fallback {
+    if (self.systemSleeping && self.playingURL != nil) return;
     if (self.failureReported || self.recoveryScheduled) return;
     if ([self canRecoverFromError:error]) {
         NSString *reason = error.localizedDescription.length > 0
@@ -378,6 +388,11 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (void)teardownPlaybackForRestart {
+    CMTime currentTime = self.player.currentItem.currentTime;
+    if (!CMTIME_IS_NUMERIC(self.resumeTime) && self.everProducedFrame &&
+        CMTIME_IS_NUMERIC(currentTime) && CMTimeCompare(currentTime, kCMTimeZero) >= 0) {
+        self.resumeTime = currentTime;
+    }
     self.openGeneration += 1;
     [self.player pause];
     [self clearSnapshotOutput];
@@ -391,6 +406,9 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
     self.loaded = NO;
     self.failureReported = NO;
     self.firstFrameReported = NO;
+    self.resumeSeekStarted = NO;
+    self.resumeSeekCompleted = NO;
+    self.recoveryScheduled = NO;
     self.lastItemEndReport = 0;
     self.lastPlaybackTime = NAN;
     self.lastLoopCount = NSNotFound;
@@ -399,7 +417,8 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (void)scheduleRecovery {
-    if (self.recoveryScheduled) return;
+    if (self.systemSleeping || self.playingURL == nil ||
+        self.failureReported || self.recoveryScheduled) return;
     self.recoveryScheduled = YES;
     self.recoveryAttempts += 1;
     NSURL *url = self.playingURL;
@@ -409,9 +428,8 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         __strong __typeof__(weakSelf) strongSelf = weakSelf;
-        if (strongSelf == nil) return;
-        strongSelf.recoveryScheduled = NO;
-        if (strongSelf.openGeneration != generation) return;
+        // An old task must not clear the flag belonging to a newer recovery.
+        if (strongSelf == nil || strongSelf.openGeneration != generation) return;
         [strongSelf teardownPlaybackForRestart];
         NSError *playError = nil;
         if (![strongSelf startPlaybackOfURL:url error:&playError]) {
@@ -436,11 +454,38 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
                                  queue:NSOperationQueue.mainQueue
                             usingBlock:wake]];
     }
+    [self.systemPowerObservers addObject:
+        [center addObserverForName:NSWorkspaceWillSleepNotification
+                            object:nil
+                             queue:NSOperationQueue.mainQueue
+                        usingBlock:^(NSNotification *note) {
+            (void)note;
+            [weakSelf handleSystemWillSleep];
+        }]];
+}
+
+- (void)handleSystemWillSleep {
+    if (self.systemSleeping) return;
+    self.systemSleeping = YES;
+    // A transcode can finish in the background; defer its playback, not its work.
+    if (self.playingURL == nil || self.failureReported) return;
+    fprintf(stderr, "VideoRenderer: system sleeping, dropping playback until wake\n");
+    [self teardownPlaybackForRestart];
+    self.recoveryAttempts = 0;
 }
 
 - (void)handleSystemDidWake {
-    if (!self.loaded) return;
+    self.systemSleeping = NO;
     [self updateDynamicRangeForScreen:self.window.screen ?: NSScreen.mainScreen];
+    if (self.failureReported) return;
+    if (self.playingURL != nil && !self.loaded) {
+        if (!self.recoveryScheduled) {
+            fprintf(stderr, "VideoRenderer: rebuilding playback after wake\n");
+        }
+        [self scheduleRecovery];
+        return;
+    }
+    if (!self.loaded) return;
     AVPlayerItem *current = self.player.currentItem;
     if (current != nil && current.status == AVPlayerItemStatusFailed) {
         [self reportPlaybackFailure:current.error
@@ -461,7 +506,8 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 - (void)verifyPlaybackAfterWakeForGeneration:(uint64_t)generation
                                 attemptsLeft:(NSInteger)attemptsLeft {
     if (self.openGeneration != generation) return;
-    if (!self.loaded || self.failureReported || self.recoveryScheduled) return;
+    if (self.systemSleeping || !self.loaded || !self.firstFrameReported ||
+        self.failureReported || self.recoveryScheduled) return;
     if (self.hostPaused || self.playbackRate <= 0.0f) return;
     AVPlayerItem *current = self.player.currentItem;
     if (current == nil) {
@@ -488,7 +534,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (void)checkPlaybackHealth {
-    if (!self.loaded || !self.firstFrameReported || self.failureReported ||
+    if (self.systemSleeping || !self.loaded || !self.firstFrameReported || self.failureReported ||
         self.recoveryScheduled || self.hostPaused || self.playbackRate <= 0.0f) {
         self.lastPlaybackTime = NAN;
         self.lastLoopCount = NSNotFound;
@@ -634,6 +680,9 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
     self.everProducedFrame = NO;
     self.recoveryAttempts = 0;
     self.recoveryScheduled = NO;
+    self.resumeTime = kCMTimeInvalid;
+    self.resumeSeekStarted = NO;
+    self.resumeSeekCompleted = NO;
     self.lastPlaybackTime = NAN;
     self.lastLoopCount = NSNotFound;
     self.stalledPlaybackSamples = 0;
@@ -709,6 +758,10 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 }
 
 - (BOOL)startPlaybackOfURL:(NSURL *)url error:(NSError **)error {
+    if (self.systemSleeping) {
+        self.playingURL = url;
+        return YES;
+    }
     NSDictionary *assetOptions = @{
         AVURLAssetPreferPreciseDurationAndTimingKey: @NO,
     };
@@ -734,7 +787,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 
     self.looper = [AVPlayerLooper playerLooperWithPlayer:self.player templateItem:item];
     self.player.volume = self.volume;
-    self.player.muted = self.muted;
+    [self applyAudioState];
     self.playingURL = url;
     self.loaded = YES;
 
@@ -757,8 +810,45 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
                                     deadline:[NSDate dateWithTimeIntervalSinceNow:
                                                  kVRFirstFrameTimeout]];
 
+    [self restorePlaybackTimeIfNeeded];
     [self applyPlaybackState];
     return YES;
+}
+
+- (void)restorePlaybackTimeIfNeeded {
+    if (self.systemSleeping || !self.loaded || self.failureReported ||
+        !CMTIME_IS_NUMERIC(self.resumeTime) || self.resumeSeekStarted) return;
+    AVPlayerItem *current = self.player.currentItem;
+    if (current.status != AVPlayerItemStatusReadyToPlay) return;
+
+    // Attach before seeking so the output receives the target frame even when paused.
+    if (self.frameProbe == nil || ![current.outputs containsObject:self.frameProbe]) {
+        self.frameProbe = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        }];
+        [current addOutput:self.frameProbe];
+    }
+    CMTime target = self.resumeTime;
+    if (CMTIME_IS_NUMERIC(current.duration) &&
+        CMTimeCompare(target, current.duration) >= 0) {
+        target = kCMTimeZero;
+    }
+    self.resumeSeekStarted = YES;
+    const uint64_t generation = self.openGeneration;
+    __weak __typeof__(self) weakSelf = self;
+    [self.player seekToTime:target toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+         completionHandler:^(BOOL finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong __typeof__(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil || strongSelf.openGeneration != generation) return;
+            if (!finished) {
+                [strongSelf reportPlaybackFailure:strongSelf.player.currentItem.error
+                                         fallback:@"video could not be restarted"];
+                return;
+            }
+            strongSelf.resumeSeekCompleted = YES;
+        });
+    }];
 }
 
 // Polls rather than sampling once, and attaches the output to the item the looper
@@ -773,7 +863,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
                    dispatch_get_main_queue(), ^{
         __strong __typeof__(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil || strongSelf.openGeneration != generation) return;
-        if (strongSelf.failureReported || !strongSelf.loaded) return;
+        if (strongSelf.systemSleeping || strongSelf.failureReported || !strongSelf.loaded) return;
 
         AVPlayerItem *current = strongSelf.player.currentItem;
         if (current == nil) {
@@ -785,6 +875,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
             [strongSelf armFirstFrameWatchdogForGeneration:generation deadline:deadline];
             return;
         }
+        [strongSelf restorePlaybackTimeIfNeeded];
         AVPlayerItemVideoOutput *probe = strongSelf.frameProbe;
         if (probe == nil || ![current.outputs containsObject:probe]) {
             probe = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:@{
@@ -795,12 +886,16 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
             [strongSelf armFirstFrameWatchdogForGeneration:generation deadline:deadline];
             return;
         }
-        if ([probe hasNewPixelBufferForItemTime:current.currentTime]) {
+        BOOL positionReady = !CMTIME_IS_NUMERIC(strongSelf.resumeTime) || strongSelf.resumeSeekCompleted;
+        if (positionReady && [probe hasNewPixelBufferForItemTime:current.currentTime]) {
             [current removeOutput:probe];
             strongSelf.frameProbe = nil;
             strongSelf.everProducedFrame = YES;
             if (!strongSelf.firstFrameReported) {
                 strongSelf.firstFrameReported = YES;
+                strongSelf.resumeTime = kCMTimeInvalid;
+                strongSelf.resumeSeekStarted = NO;
+                strongSelf.resumeSeekCompleted = NO;
                 [strongSelf applyPlaybackState];
                 if (strongSelf.firstFrameReadyBlock) strongSelf.firstFrameReadyBlock();
             }
@@ -840,16 +935,30 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 
 - (void)applyPlaybackState {
     if (!self.loaded) return;
+    if (self.systemSleeping || CMTIME_IS_NUMERIC(self.resumeTime)) {
+        [self.player pause];
+        [self applyAudioState];
+        return;
+    }
     if (!self.firstFrameReported) {
+        [self applyAudioState];
         float startupRate = self.playbackRate > 0.0f ? self.playbackRate : 1.0f;
         [self.player playImmediatelyAtRate:startupRate];
         return;
     }
     if (self.hostPaused || self.playbackRate <= 0.0f) {
         [self.player pause];
+        [self applyAudioState];
         return;
     }
+    [self applyAudioState];
     [self.player playImmediatelyAtRate:self.playbackRate];
+}
+
+- (void)applyAudioState {
+    // Desired mute state stays separate from the temporary decoder warm-up gate.
+    self.player.muted = self.muted || self.systemSleeping || CMTIME_IS_NUMERIC(self.resumeTime) ||
+        (!self.firstFrameReported && (self.hostPaused || self.playbackRate <= 0.0f));
 }
 
 - (void)setVolume:(float)volume {
@@ -859,7 +968,7 @@ static BOOL VREncodeSnapshot(CGImageRef image, NSString *path) {
 
 - (void)setMuted:(BOOL)muted {
     _muted = muted;
-    self.player.muted = muted;
+    [self applyAudioState];
 }
 
 - (void)takeSnapshotToPath:(NSString *)path
