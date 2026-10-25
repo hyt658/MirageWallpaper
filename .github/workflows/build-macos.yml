@@ -81,6 +81,19 @@ jobs:
             exit 1
           fi
 
+      - name: Test notarization retry handling
+        shell: bash
+        run: python3 Mirage/Tests/run_notarization.py
+
+      - name: Use TCP for Apple notarization tickets
+        shell: bash
+        run: |
+          # Temporary workaround for actions/runner-images#14924. Restrict this
+          # to disposable GitHub-hosted runners; regular HTTPS still uses TCP.
+          printf '%s\n' 'block return out quick proto udp from any to any port 443' | sudo pfctl -f -
+          sudo pfctl -E
+          sudo pfctl -sr
+
       - name: Validate build secret
         shell: bash
         env:
@@ -304,7 +317,7 @@ jobs:
           codesign -dvvv "$app" 2>&1 | grep -Fq "Authority=$MIRAGE_SIGN_IDENTITY"
           codesign -dvvv "$app" 2>&1 | grep -Fq "TeamIdentifier=$MIRAGE_DEVELOPMENT_TEAM"
           codesign -dvv "$app" 2>&1 | grep -q 'flags=.*runtime'
-          xcrun stapler validate "$app"
+          bash Mirage/scripts/stapler_with_retry.sh validate "$app"
           spctl --assess --type execute --verbose=4 "$app"
 
       - name: Package app

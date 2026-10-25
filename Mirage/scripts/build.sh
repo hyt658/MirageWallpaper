@@ -145,8 +145,8 @@ if [ "$SIGN_IDENTITY" != "-" ] && [ -n "$NOTARY_PROFILE" ]; then
         xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_AUTH_ARGS[@]}" >&2 || true
         exit 1
     fi
-    xcrun stapler staple "$OUT/Mirage.app"
-    xcrun stapler validate "$OUT/Mirage.app"
+    bash "$HERE/stapler_with_retry.sh" staple "$OUT/Mirage.app"
+    bash "$HERE/stapler_with_retry.sh" validate "$OUT/Mirage.app"
 fi
 
 echo "[build] 完成  产物: $OUT/Mirage.app"
