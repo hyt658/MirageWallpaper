@@ -151,11 +151,11 @@ struct PerformancePage: SettingsPage {
             }
 
             Section {
-                Toggle("同视频共享播放", isOn: Binding(
+                Toggle("多屏同步视频进度", isOn: Binding(
                     get: { viewModel.settings.shouldShareVideoPlayback },
                     set: { viewModel.settings.shareVideoPlayback = $0 }
                 ))
-                Text("切换壁纸后生效。同一视频与兼容播放设置的显示器共享播放进度和声音，以减少内存占用；不同播放设置会自动使用独立会话。")
+                Text("切换或重新应用壁纸后生效。使用同一视频且倍速、暂停状态、音量、静音状态和加载方式一致的显示器共享播放进度与声音；这些设置不一致时独立播放，恢复一致后重新同步。各屏幕可独立设置填充方式、画面位置和 HDR。")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("启用 HDR 视频", isOn: Binding(
                     get: { viewModel.settings.shouldEnableHDRVideo },

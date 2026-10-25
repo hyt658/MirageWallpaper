@@ -1350,5 +1350,5 @@
 "优先使用动画或视频周期；无法识别周期时使用 30 秒。" = "Use the animation or video cycle when available; otherwise use 30 seconds.";
 
 /* Shared video playback */
-"同视频共享播放" = "Share playback of the same video";
-"切换壁纸后生效。同一视频与兼容播放设置的显示器共享播放进度和声音，以减少内存占用；不同播放设置会自动使用独立会话。" = "Takes effect when switching wallpapers. Displays using the same video and compatible playback settings share playback progress and audio to reduce memory use. Different playback settings automatically use separate sessions.";
+"多屏同步视频进度" = "Sync video playback across displays";
+"切换或重新应用壁纸后生效。使用同一视频且倍速、暂停状态、音量、静音状态和加载方式一致的显示器共享播放进度与声音；这些设置不一致时独立播放，恢复一致后重新同步。各屏幕可独立设置填充方式、画面位置和 HDR。" = "Applies when switching or reapplying wallpapers. Displays using the same video, playback speed, pause state, volume, mute state, and loading mode share playback progress and audio. Different settings use independent playback; matching settings sync again. Fill mode, position, and HDR can be set independently for each display.";

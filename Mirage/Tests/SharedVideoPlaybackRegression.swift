@@ -46,6 +46,30 @@ private struct SharedVideoPlaybackRegression {
         if !condition() { throw Failure(description: description) }
     }
 
+    static func checkSettingsCompatibility() throws {
+        let defaults = GlobalSettings()
+        try check(defaults.shouldShareVideoPlayback, "new settings must enable video synchronization")
+        let saved = try JSONSerialization.jsonObject(with: JSONEncoder().encode(defaults)) as! [String: Any]
+        let cases: [(String, Any?, Bool)] = [
+            ("missing", nil, true),
+            ("null", NSNull(), true),
+            ("enabled", true, true),
+            ("disabled", false, false)
+        ]
+        for (name, value, expected) in cases {
+            var settings = saved
+            settings["shareVideoPlayback"] = value
+            let restored = try JSONDecoder().decode(GlobalSettings.self,
+                from: JSONSerialization.data(withJSONObject: settings))
+            try check(restored.shouldShareVideoPlayback == expected,
+                      "incorrect synchronization preference for \(name) settings")
+            let reloaded = try JSONDecoder().decode(GlobalSettings.self,
+                from: JSONEncoder().encode(restored))
+            try check(reloaded.shouldShareVideoPlayback == expected,
+                      "saving and reloading changed the \(name) synchronization preference")
+        }
+    }
+
     static func runMockRenderer() {
         var failures: [String: Bool] = [:]
         func emit(_ name: String, _ endpoint: String) {
@@ -76,6 +100,7 @@ private struct SharedVideoPlaybackRegression {
     @MainActor
     static func main() async throws {
         if CommandLine.arguments.contains("--control-stdin") { runMockRenderer(); return }
+        try checkSettingsCompatibility()
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.finishLaunching()
         let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -140,13 +165,6 @@ private struct SharedVideoPlaybackRegression {
         try await wait("last endpoint releases physical process") {
             !finalHost.transport.process.isRunning && events.exitCount(final) == 1
         }
-
-        // Settings written before this feature must retain independent playback.
-        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(GlobalSettings())) as! [String: Any]
-        legacy.removeValue(forKey: "shareVideoPlayback")
-        let restored = try JSONDecoder().decode(GlobalSettings.self,
-            from: JSONSerialization.data(withJSONObject: legacy))
-        try check(!restored.shouldShareVideoPlayback, "legacy settings enabled sharing")
 
         // Exercise the real controller's switch and synchronous shutdown paths.
         let controller = RendererController()

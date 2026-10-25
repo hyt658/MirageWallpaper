@@ -69,6 +69,18 @@ class Host:
             time.sleep(0.05)
         raise AssertionError(f"playback did not settle: {message}")
 
+    def assert_synchronized(self, leader, follower):
+        # Bracket the follower's sample so IPC latency and a loop boundary do
+        # not look like drift. The temporary video lasts exactly two seconds.
+        before = self.status(leader)["time"]
+        joined = self.status(follower)["time"]
+        after = self.status(leader)["time"]
+        advanced = (after - before) % 2
+        offset = (joined - before) % 2
+        tolerance = 1 / 30
+        assert offset <= advanced + tolerance or offset >= 2 - tolerance, (
+            f"{follower} is out of sync with {leader}: {before}, {joined}, {after}")
+
     def close(self):
         if self.process.poll() is None:
             self.process.stdin.close()
@@ -106,6 +118,7 @@ def test(executable, ffmpeg, display, directory, memory):
         assert first["endpoints"] == 2
         host.wait("video-did-end", "first", timeout=5)
         assert host.status("second")["ready"], "both layers survive looping"
+        host.assert_synchronized("first", "second")
 
         # A hidden candidate must not mute a visible member of the same group.
         for token in ("first", "second"):
@@ -125,9 +138,11 @@ def test(executable, ffmpeg, display, directory, memory):
         # Joining an already paused group still prepares its own display layer.
         for token in ("first", "second"):
             host.send(token, "power", state="pause")
-        host.settled("first", 1, True)
+        paused = host.settled("first", 1, True)
         attach("paused-join", paused=True)
-        host.settled("paused-join", 1, True)
+        joined = host.settled("paused-join", 1, True)
+        assert abs(joined["time"] - paused["time"]) < 0.01, "paused late join lost the shared progress"
+        assert abs(host.status("first")["time"] - paused["time"]) < 0.01, "late join moved the paused group"
         host.send("paused-join", "detach")
         host.wait("detached", "paused-join")
         for token in ("first", "second"):
@@ -145,6 +160,7 @@ def test(executable, ffmpeg, display, directory, memory):
 
         host.send("first", "power", state="run")
         host.settled("first", 1, False)
+        host.assert_synchronized("second", "first")
         host.send("first", "speed", value=0.5)
         host.settled("first", 2, False)
         host.send("first", "speed", value=1)
@@ -152,6 +168,10 @@ def test(executable, ffmpeg, display, directory, memory):
         host.send("first", "muted", value=False)
         host.settled("first", 2)
         host.send("first", "muted", value=True)
+        host.settled("first", 1)
+        host.send("first", "volume", value=0.25)
+        host.settled("first", 2)
+        host.send("first", "volume", value=0)
         host.settled("first", 1)
         host.send("first", "hdr", value=True)
         host.send("first", "position", x=1, y=0)
@@ -167,8 +187,21 @@ def test(executable, ffmpeg, display, directory, memory):
         host.wait("detached", "first")
         assert host.status("second")["endpoints"] == 1
         host.settled("second", 1, False)
+        deadline = time.monotonic() + 5
+        while True:
+            before_join = host.status("second")["time"]
+            if 0.5 <= before_join <= 1:
+                break
+            assert time.monotonic() < deadline, "existing display stopped advancing"
+            time.sleep(0.02)
+        started = time.monotonic()
         attach("late")
         assert host.settled("late", 1)["endpoints"] == 2
+        after_join = host.status("second")["time"]
+        elapsed = time.monotonic() - started
+        drift = (after_join - before_join - elapsed + 1) % 2 - 1
+        assert abs(drift) < 0.15, "late join reset or interrupted the existing display"
+        host.assert_synchronized("second", "late")
         host.send("second", "detach")
         host.wait("detached", "second")
         host.send("late", "detach")
@@ -178,7 +211,7 @@ def test(executable, ffmpeg, display, directory, memory):
         assert host.settled("replacement", 1)["endpoints"] == 1
         host.send("replacement", "detach")
         host.wait("detached", "replacement")
-        print(f"PASS: shared playback, independent controls, snapshots, detach, late join; memory={memory}", flush=True)
+        print(f"PASS: synchronized progress, independent controls, snapshots, detach, late join continuity; memory={memory}", flush=True)
     finally:
         host.close()
 
