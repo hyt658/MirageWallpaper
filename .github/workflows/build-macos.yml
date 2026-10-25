@@ -36,6 +36,102 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  moltenvk:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref_type == 'tag' ||
+      !startsWith(github.event.head_commit.message, 'chore(release): bump version')
+    name: Prepare protected production MoltenVK
+    runs-on: macos-15
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      archive_sha256: ${{ steps.archive.outputs.sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Select newest Xcode
+        shell: bash
+        run: |
+          newest="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [[ -z "$newest" ]]; then
+            echo "::error::No Xcode found on the runner."
+            exit 1
+          fi
+          sudo xcode-select -s "$newest/Contents/Developer"
+          xcodebuild -version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "Selected macOS SDK: $sdk"
+          major="${sdk%%.*}"
+          if (( major < 26 )); then
+            echo "::error::macOS 26 SDK is required to link the current system UI, but the newest available SDK is $sdk. Update the runner image or install Xcode 26."
+            exit 1
+          fi
+
+      - name: Compute MoltenVK cache fingerprint
+        id: moltenvk
+        shell: bash
+        run: |
+          {
+            printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+            sw_vers -productVersion
+            sw_vers -buildVersion
+            xcodebuild -version
+            xcrun --sdk macosx --show-sdk-version
+            xcrun --sdk macosx --show-sdk-build-version
+            shasum -a 256 Mirage/scripts/build_moltenvk.py
+          } > "$RUNNER_TEMP/moltenvk-build-inputs.txt"
+          fingerprint="$(shasum -a 256 "$RUNNER_TEMP/moltenvk-build-inputs.txt" | cut -d' ' -f1)"
+          echo "key=moltenvk-production-universal-v1-$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore protected production MoltenVK
+        id: moltenvk_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/MoltenVKProduction
+          key: ${{ steps.moltenvk.outputs.key }}
+
+      - name: Build protected production MoltenVK
+        if: steps.moltenvk_cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/MoltenVKProduction"
+          python3 Mirage/scripts/build_moltenvk.py --mode production --output "$RUNNER_TEMP/MoltenVKProduction"
+
+      - name: Verify protected production MoltenVK
+        shell: bash
+        run: |
+          python3 Mirage/scripts/build_moltenvk.py --mode production --verify "$RUNNER_TEMP/MoltenVKProduction"
+          test -d "$RUNNER_TEMP/MoltenVKProduction/Licenses"
+          test -n "$(find "$RUNNER_TEMP/MoltenVKProduction/Licenses" -type f -print -quit)"
+
+      - name: Archive protected production MoltenVK
+        id: archive
+        shell: bash
+        run: |
+          tar -cf "$RUNNER_TEMP/moltenvk-production.tar" -C "$RUNNER_TEMP/MoltenVKProduction" \
+            libMoltenVK.dylib manifest.json Licenses
+          echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/moltenvk-production.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Save protected production MoltenVK
+        if: steps.moltenvk_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/MoltenVKProduction
+          key: ${{ steps.moltenvk_cache.outputs.cache-primary-key }}
+
+      - name: Upload protected production MoltenVK
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: moltenvk-production-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/moltenvk-production.tar
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     # A release commit only updates version metadata and notes on main. The
     # matching v* tag still performs the authoritative release build.
@@ -43,6 +139,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.ref_type == 'tag' ||
       !startsWith(github.event.head_commit.message, 'chore(release): bump version')
+    needs: moltenvk
     name: Build and package (${{ matrix.arch }})
     strategy:
       matrix:
@@ -80,6 +177,22 @@ jobs:
             echo "::error::macOS 26 SDK is required to link the current system UI, but the newest available SDK is $sdk. Update the runner image or install Xcode 26."
             exit 1
           fi
+
+      - name: Download protected production MoltenVK
+        uses: actions/download-artifact@v7
+        with:
+          artifact-ids: ${{ needs.moltenvk.outputs.artifact_id }}
+          path: ${{ runner.temp }}
+
+      - name: Verify shared production MoltenVK
+        shell: bash
+        env:
+          MOLTENVK_ARCHIVE_SHA256: ${{ needs.moltenvk.outputs.archive_sha256 }}
+        run: |
+          printf '%s  %s\n' "$MOLTENVK_ARCHIVE_SHA256" "$RUNNER_TEMP/moltenvk-production.tar" | shasum -a 256 --check
+          mkdir -p "$RUNNER_TEMP/MoltenVKProduction"
+          tar -xf "$RUNNER_TEMP/moltenvk-production.tar" -C "$RUNNER_TEMP/MoltenVKProduction"
+          python3 Mirage/scripts/build_moltenvk.py --mode production --verify "$RUNNER_TEMP/MoltenVKProduction"
 
       - name: Test notarization retry handling
         shell: bash
@@ -210,10 +323,6 @@ jobs:
       - name: Test scene diagnostics
         shell: bash
         run: python3 Mirage/Tests/run_scene_diagnostics.py
-
-      - name: Build protected production MoltenVK
-        shell: bash
-        run: python3 Mirage/scripts/build_moltenvk.py --mode production --output "$RUNNER_TEMP/MoltenVKProduction"
 
       - name: Build controlled diagnostic libraries
         if: github.event_name == 'workflow_dispatch' && inputs.scene_diagnostics
@@ -372,6 +481,7 @@ jobs:
       - name: Download packages
         uses: actions/download-artifact@v7
         with:
+          pattern: Mirage-*-macOS-*
           path: artifacts
 
       - name: Resolve Sparkle publishing tools
