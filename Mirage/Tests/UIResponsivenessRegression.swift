@@ -127,6 +127,65 @@ private final class ImageProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
+@MainActor
+private final class WallpaperFollowProbe: WallpaperFollowEnvironment {
+    struct Request {
+        let target: WallpaperFollowService.Target
+        let source: DisplayKey
+        let wallpaperID: String
+        let runtime: WallpaperRuntimeState
+        let mode: DynamicLockScreenMode?
+    }
+
+    var displays: [DisplayInfo] = [
+        DisplayInfo(key: DisplayKey(rawValue: "follow-main"), displayID: 7101, index: 0,
+                    name: "Main", size: CGSize(width: 1920, height: 1080), isMain: true),
+        DisplayInfo(key: DisplayKey(rawValue: "follow-other"), displayID: 7102, index: 1,
+                    name: "Other", size: CGSize(width: 2560, height: 1440), isMain: false)
+    ]
+    var mainDisplayKey: DisplayKey? { displays.first?.key }
+    var screenSaverInstalled = true
+    var lockScreenMode: DynamicLockScreenMode? = .screenSaver
+    var states: [DisplayKey: DisplayWallpaperState] = [:]
+    var held: Set<WallpaperFollowService.Target> = []
+    var failing: Set<WallpaperFollowService.Target> = []
+    var requests: [Request] = []
+    var commits: [Request] = []
+    var active: [WallpaperFollowService.Target: Int] = [:]
+    var maximumActive = 0
+    var installations = 0
+    private var continuations: [WallpaperFollowService.Target: CheckedContinuation<Void, Never>] = [:]
+
+    func state(for key: DisplayKey) -> DisplayWallpaperState? { states[key] }
+
+    func installScreenSaver() async throws {
+        installations += 1
+        screenSaverInstalled = true
+    }
+
+    func synchronize(_ target: WallpaperFollowService.Target, from key: DisplayKey,
+                     wallpaper: WEWallpaper) async throws {
+        let request = Request(target: target, source: key, wallpaperID: wallpaper.id,
+                              runtime: states[key]!.runtime, mode: lockScreenMode)
+        requests.append(request)
+        active[target, default: 0] += 1
+        maximumActive = max(maximumActive, active[target]!)
+        defer { active[target, default: 0] -= 1 }
+        if held.contains(target) {
+            // Simulate deployment IO which cannot finish until its worker returns.
+            await withCheckedContinuation { continuations[target] = $0 }
+        }
+        try Task.checkCancellation()
+        if failing.contains(target) { throw RegressionFailure(description: "follow-deployment-failed") }
+        commits.append(request)
+    }
+
+    func release(_ target: WallpaperFollowService.Target) {
+        let continuation = continuations.removeValue(forKey: target)
+        continuation?.resume()
+    }
+}
+
 private final class PlaylistPlaybackProbe: PlaylistPlayback {
     let displayStatesChanges: CurrentValueSubject<[DisplayKey: DisplayWallpaperState], Never>
     let wallpaperChangeRequests = PassthroughSubject<DisplayKey, Never>()
@@ -203,6 +262,11 @@ private struct UIResponsivenessRegression {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             NSApplication.shared.setActivationPolicy(.accessory)
             NSApplication.shared.finishLaunching()
+            if CommandLine.arguments.contains("--wallpaper-follow") {
+                try await testWallpaperFollowing()
+                print("WallpaperFollowRegression: all checks passed")
+                return
+            }
             if CommandLine.arguments.contains("--wallpaper-runtime") {
                 ImageProtocol.imageData = try pngData(color: .green)
                 try await testConfiguration()
@@ -244,6 +308,7 @@ private struct UIResponsivenessRegression {
             try testObservation()
             try await testImages()
             try await testConfiguration()
+            try await testWallpaperFollowing()
             try testWallpaperRuntimeSnapshots()
             try await testLockScreenDeployment()
             try await testRenderers()
@@ -732,6 +797,9 @@ private struct UIResponsivenessRegression {
         let savedModel = delegate.wallpaperViewModel
         var settings = GlobalSettings()
         settings.enableSpectrum = false
+        // This fixture implements the independent renderer protocol. Shared
+        // video attachment behavior has its own SharedVideoPlaybackRegression.
+        settings.shareVideoPlayback = false
         settingsModel.settings = settings
         defer {
             settingsModel.handlePlaybackLifecycleEvent(.systemSleep)
@@ -1443,6 +1511,249 @@ private struct UIResponsivenessRegression {
         try require(saved?["a"]?["x"] == 0.1 && saved?["b"]?["x"] == 0.9,
                     "Per-display positions were not preserved")
         print("PASS: screen saver snapshots, stale save rejection and independent display positions")
+    }
+
+    static func testWallpaperFollowing() async throws {
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(GlobalSettings())) as! [String: Any]
+        for key in ["screenSaverFollowsDesktop", "lockScreenFollowsDesktop", "wallpaperFollowDisplayKey"] {
+            legacy.removeValue(forKey: key)
+        }
+        var settings = try JSONDecoder().decode(GlobalSettings.self,
+            from: JSONSerialization.data(withJSONObject: legacy))
+        let defaults = WallpaperFollowService.Options(settings)
+        try require(!defaults.screenSaver && !defaults.lockScreen && defaults.source == nil,
+                    "Legacy settings enabled following or failed to decode")
+
+        let first = try wallpaper("follow-first")
+        let second = try wallpaper("follow-second")
+        let latest = try wallpaper("follow-latest")
+        let probe = WallpaperFollowProbe()
+        let main = probe.displays[0].key
+        let other = probe.displays[1].key
+        var runtime = WallpaperRuntimeState()
+        runtime.speed = 0.5
+        runtime.position = WallpaperPosition(x: 0.15, y: 0.8)
+        runtime.propertyOverrides["amount"] = .number(0.75)
+        probe.states[main] = DisplayWallpaperState(wallpaper: first, runtime: runtime)
+        probe.states[other] = DisplayWallpaperState(wallpaper: second, runtime: WallpaperRuntimeState())
+        let service = WallpaperFollowService(environment: probe)
+        service.start(settings: settings, observeSystem: false)
+        defer { service.stop() }
+        try await Task.sleep(for: .milliseconds(180))
+        try require(probe.requests.isEmpty, "Following ran before being enabled")
+        settings.screenSaverFollowsDesktop = true
+        settings.lockScreenFollowsDesktop = true
+        service.apply(settings: settings)
+        try await waitUntil("initial desktop following") { probe.commits.count == 2 }
+        try require(probe.commits.allSatisfy { $0.source == main && $0.wallpaperID == first.id && $0.runtime == runtime },
+                    "Following used another display or lost runtime overrides")
+        service.assignmentDidCommit(on: other)
+        service.assignmentDidCommit(on: main)
+        service.refresh()
+        try await Task.sleep(for: .milliseconds(180))
+        try require(probe.requests.count == 2, "Another display or a same-wallpaper restart redeployed configuration")
+
+        probe.held = [.screenSaver, .lockScreen]
+        probe.states[main]?.wallpaper = second
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("blocked following deployment") { probe.requests.count == 4 }
+        for wallpaper in [first, second, latest] {
+            probe.states[main]?.wallpaper = wallpaper
+            service.assignmentDidCommit(on: main)
+        }
+        try require(probe.requests.count == 4, "Rapid selection queued extra deployment workers")
+        probe.held.removeAll()
+        probe.release(.screenSaver)
+        probe.release(.lockScreen)
+        try await waitUntil("latest following deployment") { probe.commits.count == 4 }
+        try require(probe.requests.count == 6 && probe.maximumActive == 1 &&
+                    probe.commits.suffix(2).allSatisfy { $0.wallpaperID == latest.id },
+                    "An obsolete deployment published or workers accumulated")
+
+        probe.held = [.screenSaver, .lockScreen]
+        probe.states[main]?.wallpaper = second
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("deployment before switching back") { probe.requests.count == 8 }
+        probe.states[main]?.wallpaper = latest
+        service.assignmentDidCommit(on: main)
+        probe.held.removeAll()
+        probe.release(.screenSaver)
+        probe.release(.lockScreen)
+        try await waitUntil("republish previous selection after cancellation") { probe.commits.count == 6 }
+        try require(probe.requests.count == 10 && probe.commits.suffix(2).allSatisfy { $0.wallpaperID == latest.id },
+                    "Switching back trusted a cached success after another writer had started")
+
+        probe.failing = [.lockScreen]
+        probe.states[main]?.wallpaper = second
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("independent following failure") {
+            if case .failed = service.lockScreenStatus { return service.screenSaverStatus == .synchronized(second.project.title) }
+            return false
+        }
+        probe.failing.removeAll()
+        service.retry(.lockScreen)
+        try await waitUntil("following retry") { service.lockScreenStatus == .synchronized(second.project.title) }
+
+        probe.held = [.screenSaver]
+        probe.states[main]?.wallpaper = first
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("following before manual override") { probe.active[.screenSaver] == 1 }
+        service.beginManualConfiguration(.screenSaver)
+        probe.held.removeAll()
+        probe.release(.screenSaver)
+        try await waitUntil("manual override cancellation") { probe.active[.screenSaver] == 0 }
+        let afterManual = probe.commits.filter { $0.target == .screenSaver }.count
+        service.refresh()
+        try await Task.sleep(for: .milliseconds(180))
+        try require(service.screenSaverStatus == .manual &&
+                    probe.commits.filter { $0.target == .screenSaver }.count == afterManual,
+                    "A cancelled automatic job overwrote a manual configuration")
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("resume after manual override") { service.screenSaverStatus == .synchronized(first.project.title) }
+
+        probe.held = [.lockScreen]
+        probe.states[main]?.wallpaper = latest
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("following before disable") { probe.active[.lockScreen] == 1 }
+        let beforeDisable = probe.commits.filter { $0.target == .lockScreen }.count
+        settings.lockScreenFollowsDesktop = false
+        service.apply(settings: settings)
+        probe.held.removeAll()
+        probe.release(.lockScreen)
+        try await waitUntil("disabled following cancellation") { probe.active[.lockScreen] == 0 }
+        try require(service.lockScreenStatus == .off &&
+                    probe.commits.filter { $0.target == .lockScreen }.count == beforeDisable,
+                    "Disabling following allowed an in-flight lock deployment to publish")
+
+        settings.wallpaperFollowDisplayKey = other.rawValue
+        settings.lockScreenFollowsDesktop = true
+        probe.lockScreenMode = .extensionMode
+        service.apply(settings: settings)
+        try await waitUntil("explicit follow display") { service.lockScreenStatus == .synchronized(second.project.title) }
+        try require(probe.commits.last?.source == other && probe.commits.last?.mode == .extensionMode,
+                    "The chosen source display or active lock screen method was ignored")
+        probe.displays.removeAll { $0.key == other }
+        service.refresh()
+        try require(service.screenSaverStatus == .waitingForDisplay && service.lockScreenStatus == .waitingForDisplay,
+                    "A disconnected source fell back to an unrelated display")
+        let countBeforeDisconnect = probe.requests.count
+        service.assignmentDidCommit(on: main)
+        try await Task.sleep(for: .milliseconds(180))
+        try require(probe.requests.count == countBeforeDisconnect, "A disconnected explicit source kept following other displays")
+
+        settings.wallpaperFollowDisplayKey = nil
+        var web = first
+        web.project.type = "web"
+        probe.states[main]?.wallpaper = web
+        service.apply(settings: settings)
+        try require(service.screenSaverStatus == .unsupportedWallpaper && service.lockScreenStatus == .unsupportedWallpaper,
+                    "An unsupported web wallpaper reached a configuration writer")
+        probe.states[main] = nil
+        service.assignmentDidCommit(on: main)
+        try require(service.screenSaverStatus == .waitingForWallpaper, "Stopping the source did not stop pending synchronization")
+
+        probe.states[main] = DisplayWallpaperState(wallpaper: first, runtime: runtime)
+        probe.screenSaverInstalled = false
+        probe.lockScreenMode = nil
+        service.refresh()
+        try require(service.screenSaverStatus == .waitingForScreenSaver && service.lockScreenStatus == .waitingForLockScreen,
+                    "Missing components or a disabled lock screen were implicitly enabled")
+        try require(probe.installations == 0, "Routine following reinstalled the screen saver")
+        service.retry(.screenSaver)
+        try await waitUntil("screen saver installation") { service.screenSaverStatus == .synchronized(first.project.title) }
+        try require(probe.installations == 1, "Explicit installation was skipped or repeated")
+        probe.states[main]?.wallpaper = latest
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("following after install") { service.screenSaverStatus == .synchronized(latest.project.title) }
+        try require(probe.installations == 1, "Playlist changes reinstalled the screen saver")
+
+        probe.held = [.lockScreen]
+        probe.lockScreenMode = .extensionMode
+        service.refresh()
+        try await waitUntil("lock method deployment") { probe.active[.lockScreen] == 1 }
+        let beforeModeSwitch = probe.commits.filter { $0.target == .lockScreen }.count
+        probe.lockScreenMode = .screenSaver
+        service.refresh()
+        probe.held.removeAll()
+        probe.release(.lockScreen)
+        try await waitUntil("new lock method deployment") {
+            probe.commits.filter { $0.target == .lockScreen }.count == beforeModeSwitch + 1
+        }
+        try require(probe.commits.last?.mode == .screenSaver, "A superseded lock screen method published configuration")
+
+        probe.held = [.screenSaver, .lockScreen]
+        probe.states[main]?.wallpaper = second
+        service.assignmentDidCommit(on: main)
+        try await waitUntil("deployment before unsupported wallpaper") {
+            probe.active[.screenSaver] == 1 && probe.active[.lockScreen] == 1
+        }
+        let beforeWeb = probe.commits.count
+        probe.states[main]?.wallpaper = web
+        service.assignmentDidCommit(on: main)
+        probe.held.removeAll()
+        probe.release(.screenSaver)
+        probe.release(.lockScreen)
+        try await waitUntil("unsupported wallpaper cancels deployment") {
+            probe.active[.screenSaver] == 0 && probe.active[.lockScreen] == 0
+        }
+        try require(probe.commits.count == beforeWeb && service.screenSaverStatus == .unsupportedWallpaper,
+                    "An older supported wallpaper published after switching to an unsupported one")
+
+        let installationProbe = WallpaperFollowProbe()
+        installationProbe.screenSaverInstalled = false
+        installationProbe.states[main] = DisplayWallpaperState(wallpaper: first, runtime: runtime)
+        let installationService = WallpaperFollowService(environment: installationProbe)
+        installationService.start(settings: GlobalSettings(), observeSystem: false)
+        defer { installationService.stop() }
+        var installSettings = GlobalSettings()
+        installSettings.screenSaverFollowsDesktop = true
+        installationService.apply(settings: installSettings)
+        try await waitUntil("install when enabling following") {
+            installationService.screenSaverStatus == .synchronized(first.project.title)
+        }
+        try require(installationProbe.installations == 1 && installationProbe.commits.count == 1,
+                    "Enabling following failed to install and configure the screen saver exactly once")
+
+        let manager = ScreenSaverManager(configurationDirectory: root.appending(path: "FollowRequests"))
+        let context = ScreenSaverManager.ConfigurationContext(positions: [:], selectedPosition: runtime.position,
+            fps: 30, enableHDRVideo: false, loadFromMemory: false, language: "en")
+        let obsolete = manager.beginConfigurationRequest()
+        let current = manager.beginConfigurationRequest()
+        manager.cancelConfigurationRequest(obsolete)
+        try manager.configure(with: latest, runtime: runtime, properties: [:], fps: 30,
+                              context: context, requestID: current)
+        let saved = try Data(contentsOf: manager.configurationURL)
+        do {
+            try manager.configure(with: first, runtime: runtime, properties: [:], fps: 30,
+                                  context: context, requestID: obsolete)
+            throw RegressionFailure(description: "An obsolete saver request published")
+        } catch is CancellationError {}
+        manager.cancelConfigurationRequest(current)
+        do {
+            try manager.configure(with: second, runtime: runtime, properties: [:], fps: 30,
+                                  context: context, requestID: current)
+            throw RegressionFailure(description: "A cancelled saver request published")
+        } catch is CancellationError {}
+        let afterCancellation = try Data(contentsOf: manager.configurationURL)
+        try require(saved == afterCancellation, "Cancellation damaged the last valid saver configuration")
+
+        let detached = DisplayKey(rawValue: "follow-commit-probe")
+        let model = WallpaperViewModel(initialStates: [detached: DisplayWallpaperState(wallpaper: first, runtime: runtime)])
+        var committed: [String?] = []
+        model.onCommittedWallpaperChanged = { key in committed.append(model.state(for: key)?.wallpaper.id) }
+        defer { model.onCommittedWallpaperChanged = nil }
+        var prepared = false
+        model.prepareWallpaper(second, for: detached) { _ in prepared = true }
+        try await waitUntil("follow preview preparation") { prepared }
+        try require(committed.isEmpty, "A preview triggered following before assignment committed")
+        model.assign(second, to: detached, preservingPlaybackState: true)
+        try require(committed == [second.id], "A successful stopped/disconnected assignment did not trigger following")
+        model.clear(detached)
+        try require(committed.count == 2 && committed.last! == nil, "Clearing an assignment did not cancel following")
+        model.assign(first, to: detached, preservingPlaybackState: true)
+        model.stopAllWallpapers()
+        try require(committed.count == 4 && committed.last! == nil, "Stopping all wallpapers did not cancel following")
+        print("PASS: opt-in settings, committed assignment events, display isolation, latest-only deployment, manual overrides, cancellation, failure isolation, retries and saver publication guards")
     }
 
     static func testWallpaperRuntimeSnapshots() throws {

@@ -207,6 +207,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ScreenSaverDynamicLockScreenManager.shared.setEnabled(true)
         }
 
+        wallpaperViewModel.onCommittedWallpaperChanged = { key in
+            MainActor.assumeIsolated {
+                WallpaperFollowService.shared.assignmentDidCommit(on: key)
+            }
+        }
+        WallpaperFollowService.shared.start(settings: globalSettingsViewModel.savedSettings)
+
         let dynamicLockScreenActive = (DynamicLockScreenManager.shared.isEnabled
             && DynamicLockScreenManager.shared.isConfigured)
             || (ScreenSaverDynamicLockScreenManager.shared.isEnabled
@@ -242,6 +249,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        WallpaperFollowService.shared.stop()
         WallpaperBakeService.shared.cancelAll()
         PlaylistManager.shared.stopAllRotators()
         if developerLogWindowWasOpened {

@@ -153,7 +153,7 @@ final class ScreenSaverDynamicLockScreenManager: ObservableObject {
     func configureCurrentWallpaper(_ wallpaper: WEWallpaper,
                                    runtime: WallpaperRuntimeState,
                                    properties: [String: WEProjectProperty],
-                                   fps: Int) async throws {
+                                   fps: Int, sourceDisplay: DisplayKey? = nil) async throws {
         guard isAvailable, isEnabled, hasConfirmedWarning,
               DynamicLockScreenModeStore.active == .screenSaver else {
             throw ScreenSaverDynamicLockScreenError.notEnabled
@@ -162,19 +162,29 @@ final class ScreenSaverDynamicLockScreenManager: ObservableObject {
         guard wallpaper.kind == .video || wallpaper.kind == .scene else {
             throw ScreenSaverDynamicLockScreenError.unsupportedWallpaper
         }
+        if sourceDisplay == nil { WallpaperFollowService.shared.beginManualConfiguration(.lockScreen) }
         let manager = ScreenSaverManager.shared
         let requestID = UUID()
         configurationRequestID = requestID
         defer {
             if configurationRequestID == requestID { configurationRequestID = nil }
         }
-        await AppDelegate.shared.wallpaperViewModel.refreshScriptStorage(for: wallpaper)
+        let model = AppDelegate.shared.wallpaperViewModel
+        await model.refreshScriptStorage(for: wallpaper)
         guard configurationRequestID == requestID, isEnabled,
               DynamicLockScreenModeStore.active == .screenSaver, !Task.isCancelled else {
             throw CancellationError()
         }
+        var runtime = runtime
+        var properties = properties
+        if let sourceDisplay {
+            guard let current = model.state(for: sourceDisplay),
+                  current.wallpaper.hasSamePresentation(as: wallpaper) else { throw CancellationError() }
+            runtime = current.runtime
+            properties = model.effectiveProperties(for: wallpaper, runtime: runtime)
+        }
         let context = ScreenSaverManager.ConfigurationContext(
-            wallpaperID: wallpaper.id, runtime: runtime, fps: fps)
+            wallpaperID: wallpaper.id, runtime: runtime, fps: fps, sourceDisplay: sourceDisplay)
         let data: Data
         do {
             data = try await withCheckedThrowingContinuation { continuation in
@@ -182,7 +192,9 @@ final class ScreenSaverDynamicLockScreenManager: ObservableObject {
                     continuation.resume(with: Result {
                         let data = try ScreenSaverManager.prepareConfiguration(
                             with: wallpaper, runtime: runtime, properties: properties, context: context)
-                        try ScreenSaverManager.shared.installDynamicLockScreen()
+                        if !ScreenSaverManager.shared.isDynamicLockScreenInstalled {
+                            try ScreenSaverManager.shared.installDynamicLockScreen()
+                        }
                         return data
                     })
                 }
@@ -200,7 +212,9 @@ final class ScreenSaverDynamicLockScreenManager: ObservableObject {
         }
         try manager.configure(with: data, forDynamicLockScreen: true)
         AppDelegate.shared.wallpaperViewModel.saveRuntime()
-        reassertIfEnabled()
+        // An active lock host reloads through the configuration notification.
+        // Reinstalling or restarting it on each playlist tick interrupts playback.
+        if sourceDisplay == nil || !isLocked { reassertIfEnabled() }
     }
 
     func updateLoadFromMemory(_ enabled: Bool) {

@@ -1352,3 +1352,25 @@
 /* Shared video playback */
 "多屏同步视频进度" = "Sync video playback across displays";
 "切换或重新应用壁纸后生效。使用同一视频且倍速、暂停状态、音量、静音状态和加载方式一致的显示器共享播放进度与声音；这些设置不一致时独立播放，恢复一致后重新同步。各屏幕可独立设置填充方式、画面位置和 HDR。" = "Applies when switching or reapplying wallpapers. Displays using the same video, playback speed, pause state, volume, mute state, and loading mode share playback progress and audio. Different settings use independent playback; matching settings sync again. Fill mode, position, and HDR can be set independently for each display.";
+
+/* Desktop wallpaper following */
+"自动跟随已关闭" = "Automatic following is off";
+"跟随来源未连接，保留上次配置" = "The source display is disconnected. Keeping the last configuration.";
+"等待来源显示器播放壁纸，保留上次配置" = "Waiting for a wallpaper on the source display. Keeping the last configuration.";
+"当前作品不支持屏保或动态锁屏，保留上次配置" = "This wallpaper does not support the screen saver or dynamic lock screen. Keeping the last configuration.";
+"请安装 Mirage 屏保组件以继续跟随" = "Install the Mirage screen saver to resume following.";
+"请先启用动态锁屏方案并完成确认" = "Enable a dynamic lock screen method and complete its confirmation first.";
+"正在同步壁纸…" = "Synchronizing wallpaper…";
+"已暂停自动跟随，将在下次桌面指派时恢复" = "Following is paused until the next desktop wallpaper assignment.";
+"已同步：%@" = "Synchronized: %@";
+"同步失败：%@" = "Synchronization failed: %@";
+"屏保跟随桌面" = "Screen saver follows desktop";
+"动态锁屏跟随桌面" = "Dynamic lock screen follows desktop";
+"跟随来源" = "Follow display";
+"系统主显示器" = "System main display";
+"自动跟随桌面" = "Follow desktop wallpaper";
+"保存后生效。手动选择壁纸和播放列表切换都会同步。默认跟随系统主显示器；网页壁纸或来源未连接时保留上次配置。" = "Applies after saving. Manual wallpaper selections and playlist changes are synchronized. Follows the system main display by default. Web wallpapers and disconnected sources keep the last configuration.";
+"屏保同步状态" = "Screen saver synchronization";
+"锁屏同步状态" = "Lock screen synchronization";
+"重试同步" = "Retry synchronization";
+"安装并同步" = "Install and synchronize";

@@ -13,6 +13,7 @@ enum DynamicLockScreenMode: String {
 
 enum DynamicLockScreenModeStore {
     private static let key = "Mirage.DynamicLockScreen.Mode"
+    static let didChangeNotification = Notification.Name("MirageDynamicLockScreenModeDidChange")
 
     static var active: DynamicLockScreenMode? {
         guard let raw = UserDefaults.standard.string(forKey: key) else { return nil }
@@ -22,11 +23,13 @@ enum DynamicLockScreenModeStore {
     static func activate(_ mode: DynamicLockScreenMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: key)
         UserDefaults.standard.synchronize()
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
     }
 
     static func deactivate(_ mode: DynamicLockScreenMode) {
         guard active == mode else { return }
         UserDefaults.standard.removeObject(forKey: key)
         UserDefaults.standard.synchronize()
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
     }
 }

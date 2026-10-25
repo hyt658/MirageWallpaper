@@ -171,6 +171,12 @@ struct GlobalSettings: Codable, Equatable {
         automaticWallpaperCacheCleaning ?? true
     }
 
+    // Optional so settings saved before desktop following remain decodable.
+    var screenSaverFollowsDesktop: Bool? = false
+    var lockScreenFollowsDesktop: Bool? = false
+    // nil follows the system's main display; explicit keys survive reconnects.
+    var wallpaperFollowDisplayKey: String?
+
     // MARK: Appearance
     var appearance = GSAppearance.followSystem
     
@@ -970,6 +976,9 @@ class GlobalSettingsViewModel {
         }
         if savedSettings != settings {
             savedSettings = settings
+        }
+        MainActor.assumeIsolated {
+            WallpaperFollowService.shared.apply(settings: settings)
         }
     }
     

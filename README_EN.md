@@ -69,6 +69,7 @@ Please independently verify the network, address, and amount before transferring
 - Supports multi-display coverage, menu-bar controls, login launch, the subscribed-items tab, and restoring a desktop placeholder image.
 - Installs Mirage's standalone dynamic screen saver, which independently plays video and scene wallpapers while retaining the selected preset and custom properties.
 - Offers two experimental dynamic lock-screen schemes: Scheme A requires macOS 26+, Scheme B requires macOS 14.2+; both support video and scene wallpapers only.
+- Optionally follows desktop wallpaper selections and playlist changes for the screen saver and dynamic lock screen independently, using the system main display by default or a selected source display.
 - Lets you continue, mute, pause, or stop playback when another app is fullscreen, another app plays audio, the display sleeps, or the Mac is on battery.
 - Restores playback after macOS "click wallpaper to reveal desktop" interaction.
 - Shows a security confirmation before first running a web wallpaper and supports Wallpaper Engine user properties and mouse events.

@@ -15,6 +15,8 @@ struct ScreenSaverPage: SettingsPage {
     @Bindable private var wallpaperViewModel: WallpaperViewModel
     @ObservedObject private var dynamicLockScreenManager = DynamicLockScreenManager.shared
     @ObservedObject private var screenSaverDynamicLockScreenManager = ScreenSaverDynamicLockScreenManager.shared
+    @ObservedObject private var followService = WallpaperFollowService.shared
+    @State private var followDisplays = DisplayRegistry.shared.connected
     @State private var status: Status
     @State private var message = ""
     @State private var showingError = false
@@ -36,6 +38,43 @@ struct ScreenSaverPage: SettingsPage {
     var body: some View {
         Form {
             Section {
+                Toggle("屏保跟随桌面", isOn: Binding(
+                    get: { viewModel.settings.screenSaverFollowsDesktop ?? false },
+                    set: { viewModel.settings.screenSaverFollowsDesktop = $0 }
+                ))
+                Toggle("动态锁屏跟随桌面", isOn: Binding(
+                    get: { viewModel.settings.lockScreenFollowsDesktop ?? false },
+                    set: { viewModel.settings.lockScreenFollowsDesktop = $0 }
+                ))
+                if followDisplays.count > 1 || viewModel.settings.wallpaperFollowDisplayKey != nil {
+                    Picker("跟随来源", selection: Binding(
+                        get: { viewModel.settings.wallpaperFollowDisplayKey ?? "" },
+                        set: { viewModel.settings.wallpaperFollowDisplayKey = $0.isEmpty ? nil : $0 }
+                    )) {
+                        Text("系统主显示器").tag("")
+                        ForEach(followDisplays) { display in
+                            Text(display.name).tag(display.key.rawValue)
+                        }
+                        if let key = viewModel.settings.wallpaperFollowDisplayKey,
+                           !followDisplays.contains(where: { $0.key.rawValue == key }) {
+                            Text("未连接的显示器").tag(key)
+                        }
+                    }
+                }
+                if viewModel.settings.screenSaverFollowsDesktop ?? false {
+                    followStatus(followService.screenSaverStatus, target: .screenSaver)
+                }
+                if viewModel.settings.lockScreenFollowsDesktop ?? false {
+                    followStatus(followService.lockScreenStatus, target: .lockScreen)
+                }
+            } header: {
+                Label("自动跟随桌面", systemImage: "arrow.triangle.2.circlepath")
+            } footer: {
+                Text("保存后生效。手动选择壁纸和播放列表切换都会同步。默认跟随系统主显示器；网页壁纸或来源未连接时保留上次配置。")
+                    .font(.caption)
+            }
+
+            Section {
                 HStack {
                     Label(LocalizedStringKey(status.isInstalled ? "Mirage 动态屏保已安装" : "Mirage 动态屏保尚未安装"),
                           systemImage: status.isInstalled ? "checkmark.seal.fill" : "rectangle.dashed")
@@ -45,7 +84,10 @@ struct ScreenSaverPage: SettingsPage {
                         performAsync { try manager.install() }
                     }
                     if status.isInstalled {
-                        Button("卸载", role: .destructive) { performAsync { try manager.uninstall() } }
+                        Button("卸载", role: .destructive) {
+                            followService.beginManualConfiguration(.screenSaver)
+                            performAsync { try manager.uninstall() }
+                        }
                     }
                 }
                 .disabled(isWorking)
@@ -149,6 +191,13 @@ struct ScreenSaverPage: SettingsPage {
             }
         }
         .formStyle(.grouped)
+        .onReceive(NotificationCenter.default.publisher(for: DisplayRegistry.didChangeNotification)) { _ in
+            followDisplays = DisplayRegistry.shared.connected
+        }
+        .onReceive(DistributedNotificationCenter.default().publisher(
+            for: Notification.Name("cn.laobamac.Mirage.screensaver.configurationChanged"))
+            .receive(on: DispatchQueue.main)) { _ in refreshStatus() }
+        .onReceive(followService.$screenSaverStatus) { _ in refreshStatus() }
         .alert("屏保操作失败", isPresented: $showingError) {
             Button("好", role: .cancel) {}
         } message: {
@@ -170,20 +219,39 @@ struct ScreenSaverPage: SettingsPage {
         }
     }
 
+    @ViewBuilder
+    private func followStatus(_ status: WallpaperFollowService.Status, target: WallpaperFollowService.Target) -> some View {
+        HStack {
+            LabeledContent(LocalizedStringKey(target == .screenSaver ? "屏保同步状态" : "锁屏同步状态")) {
+                Text(status.message)
+                    .foregroundStyle(.secondary)
+            }
+            if case .failed = status {
+                Button("重试同步") { followService.retry(target) }
+            } else if status == .waitingForScreenSaver {
+                Button("安装并同步") { followService.retry(target) }
+            }
+        }
+    }
+
     private func configureCurrentWallpaper() async throws {
+        followService.beginManualConfiguration(.screenSaver)
+        let requestID = manager.beginConfigurationRequest()
         let wallpaper = wallpaperViewModel.currentWallpaper
+        let sourceDisplay = wallpaperViewModel.selectedDisplayKey
         let requestedAt = ProcessInfo.processInfo.systemUptime
         await wallpaperViewModel.refreshScriptStorage(for: wallpaper)
         let runtime = wallpaperViewModel.loadRuntime(for: wallpaper)
         let properties = wallpaperViewModel.effectiveProperties(for: wallpaper, runtime: runtime)
         let fps = Int(viewModel.settings.fps)
-        var context = ScreenSaverManager.ConfigurationContext(wallpaperID: wallpaper.id, runtime: runtime, fps: fps)
+        var context = ScreenSaverManager.ConfigurationContext(
+            wallpaperID: wallpaper.id, runtime: runtime, fps: fps, sourceDisplay: sourceDisplay)
         context.capturedAt = requestedAt
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(with: Result {
                     try manager.configure(with: wallpaper, runtime: runtime, properties: properties,
-                                          fps: fps, context: context)
+                                          fps: fps, context: context, requestID: requestID)
                 })
             }
         }
@@ -245,7 +313,9 @@ struct ScreenSaverPage: SettingsPage {
             DispatchQueue.main.async {
                 isWorking = false
                 switch result {
-                case .success: refreshStatus()
+                case .success:
+                    refreshStatus()
+                    followService.refresh()
                 case .failure(let error): show(error)
                 }
             }

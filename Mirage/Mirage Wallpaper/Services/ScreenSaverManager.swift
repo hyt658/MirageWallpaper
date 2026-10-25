@@ -31,6 +31,7 @@ final class ScreenSaverManager {
     private let fm = FileManager.default
     private let configurationDirectory: URL?
     private let configurationQueue = DispatchQueue(label: "cn.laobamac.Mirage.screensaver.configuration", qos: .utility)
+    private let configurationRequests = WallpaperConfigurationRequests()
 
     struct ConfigurationContext: Sendable {
         let positions: [String: WallpaperPosition]
@@ -368,10 +369,14 @@ final class ScreenSaverManager {
         return Darwin.kill(application.processIdentifier, 0) == -1 && errno == ESRCH
     }
 
+    func beginConfigurationRequest() -> UUID { configurationRequests.begin() }
+
+    func cancelConfigurationRequest(_ id: UUID) { configurationRequests.cancel(id) }
+
     func configure(with wallpaper: WEWallpaper, runtime: WallpaperRuntimeState,
                    properties: [String: WEProjectProperty], fps: Int,
                    forDynamicLockScreen: Bool = false,
-                   context: ConfigurationContext? = nil) throws {
+                   context: ConfigurationContext? = nil, requestID: UUID? = nil) throws {
         let snapshot = context ?? ConfigurationContext(wallpaperID: wallpaper.id, runtime: runtime, fps: fps)
         try configurationQueue.sync {
             let targetURL = forDynamicLockScreen ? dynamicLockScreenConfigurationURL : configurationURL
@@ -380,8 +385,15 @@ final class ScreenSaverManager {
                let configuredAt = existing["configuredAt"] as? Double, configuredAt > snapshot.capturedAt {
                 throw CancellationError()
             }
-            try writeConfiguration(with: wallpaper, runtime: runtime, properties: properties,
-                                   context: snapshot, forDynamicLockScreen: forDynamicLockScreen)
+            let data = try Self.prepareConfiguration(with: wallpaper, runtime: runtime,
+                                                     properties: properties, context: snapshot)
+            if let requestID {
+                try configurationRequests.perform(requestID) {
+                    try commitConfiguration(data, forDynamicLockScreen: forDynamicLockScreen)
+                }
+            } else {
+                try commitConfiguration(data, forDynamicLockScreen: forDynamicLockScreen)
+            }
         }
     }
 

@@ -129,6 +129,7 @@ class WallpaperViewModel: PlaylistPlayback {
 
     let displayStatesChanges = CurrentValueSubject<[DisplayKey: DisplayWallpaperState], Never>([:])
     let wallpaperChangeRequests = PassthroughSubject<DisplayKey, Never>()
+    @ObservationIgnored var onCommittedWallpaperChanged: ((DisplayKey) -> Void)?
     private var selectedWallpaperSnapshot = WallpaperViewModel.invalidWallpaper
     private var selectedRuntimeSnapshot = WallpaperRuntimeState()
     private var positionAvailabilityGeneration: UInt64 = 0
@@ -674,6 +675,7 @@ class WallpaperViewModel: PlaylistPlayback {
         committedAssignmentIDs[key] = assignmentID
         lastAppliedPlayback[key] = nil
         persistStates()
+        onCommittedWallpaperChanged?(key)
     }
 
     private func ensureCommittedAssignmentID(for key: DisplayKey) -> UUID {
@@ -744,6 +746,7 @@ class WallpaperViewModel: PlaylistPlayback {
             pendingAssignmentProposals[displayID] = nil
             renderer.stop(displayID: displayID)
         }
+        onCommittedWallpaperChanged?(key)
         syncStatusItems()
     }
 
@@ -752,6 +755,7 @@ class WallpaperViewModel: PlaylistPlayback {
     }
 
     func stopAllWallpapers() {
+        let clearedKeys = Array(displayStates.keys)
         previewSelections.removeAll()
         for info in DisplayRegistry.shared.connected { wallpaperChangeRequests.send(info.key) }
         pendingPreparations.removeAll()
@@ -771,6 +775,7 @@ class WallpaperViewModel: PlaylistPlayback {
         currentByScreen.removeAll()
         stoppedByPlaybackPolicy.removeAll()
         persistStates()
+        for key in clearedKeys { onCommittedWallpaperChanged?(key) }
         syncStatusItems()
     }
 
@@ -1802,6 +1807,7 @@ class WallpaperViewModel: PlaylistPlayback {
         finishPreview(for: proposal.key, id: proposal.id)
         lastAppliedPlayback[proposal.key] = nil
         persistStates()
+        onCommittedWallpaperChanged?(proposal.key)
         syncStatusItems()
         proposal.completion?.finish(true)
     }

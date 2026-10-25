@@ -290,13 +290,14 @@ final class DynamicLockScreenManager: ObservableObject {
                                    runtime: WallpaperRuntimeState,
                                    properties: [String: WEProjectProperty],
                                    fps: Int,
-                                   displayIDs: [UInt32]) async throws {
+                                   displayIDs: [UInt32], sourceDisplay: DisplayKey? = nil) async throws {
         guard canUse else { throw DynamicLockScreenError.notEnabled }
         guard wallpaper.isValid else { throw DynamicLockScreenError.noWallpaper }
         guard wallpaper.kind == .video || wallpaper.kind == .scene else {
             throw DynamicLockScreenError.unsupportedWallpaper
         }
         guard let container = sharedContainerURL else { throw DynamicLockScreenError.appGroupUnavailable }
+        if sourceDisplay == nil { WallpaperFollowService.shared.beginManualConfiguration(.lockScreen) }
         let requestID = UUID()
         configurationRequestID = requestID
         defer {
@@ -305,6 +306,14 @@ final class DynamicLockScreenManager: ObservableObject {
         let model = AppDelegate.shared.wallpaperViewModel
         await model.refreshScriptStorage(for: wallpaper)
         guard configurationRequestID == requestID, canUse, !Task.isCancelled else { throw CancellationError() }
+        var runtime = runtime
+        var properties = properties
+        if let sourceDisplay {
+            guard let current = model.state(for: sourceDisplay),
+                  current.wallpaper.hasSamePresentation(as: wallpaper) else { throw CancellationError() }
+            runtime = current.runtime
+            properties = model.effectiveProperties(for: wallpaper, runtime: runtime)
+        }
         let positions = model.positions(for: wallpaper.id)
         let snapshots = model.renderSnapshots(for: wallpaper.id)
         let displays = Array(Set(displayIDs)).map { displayID in
@@ -313,7 +322,7 @@ final class DynamicLockScreenManager: ObservableObject {
                 displayID: displayID,
                 fallbackSource: DesktopOverrideService.shared.dynamicLockScreenFallbackURL(forDisplay: displayID),
                 systemFallbackSource: DesktopOverrideService.shared.dynamicLockScreenSystemFallbackURL(forDisplay: displayID),
-                position: displayKey.flatMap { positions[$0] } ?? .center,
+                position: displayKey.flatMap { positions[$0] } ?? (sourceDisplay == nil ? .center : runtime.position),
                 displayKey: displayKey,
                 runtime: displayKey.flatMap { snapshots[$0] })
         }
@@ -352,7 +361,9 @@ final class DynamicLockScreenManager: ObservableObject {
         notifyConfigurationChanged()
         cleanupDeployments(except: prepared.root)
         cleanupDesktopFallbacks()
-        registerExtension()
+        if sourceDisplay == nil || connectionState == .failed || (activeProbe == nil && connectionState != .preparing) {
+            registerExtension()
+        }
         let committedConfiguration = try JSONDecoder().decode(DynamicLockScreenConfiguration.self, from: prepared.data)
         refreshRuntimePreviews(wallpaper: wallpaper, configuration: committedConfiguration)
         for (key, snapshot) in model.renderSnapshots(for: wallpaper.id) {

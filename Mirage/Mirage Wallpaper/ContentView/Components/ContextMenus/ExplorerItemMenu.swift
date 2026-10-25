@@ -329,19 +329,25 @@ struct ExplorerItemMenu: SubviewOfContentView {
     }
 
     private func setAsScreenSaver() {
+        WallpaperFollowService.shared.beginManualConfiguration(.screenSaver)
+        let requestID = ScreenSaverManager.shared.beginConfigurationRequest()
         let wallpaper = hoveredWallpaper
+        let sourceDisplay = wallpaperViewModel.selectedDisplayKey
         let requestedAt = ProcessInfo.processInfo.systemUptime
         Task { @MainActor in
             await wallpaperViewModel.refreshScriptStorage(for: wallpaper)
-            configureScreenSaver(wallpaper, requestedAt: requestedAt)
+            configureScreenSaver(wallpaper, requestedAt: requestedAt, requestID: requestID,
+                                 sourceDisplay: sourceDisplay)
         }
     }
 
-    private func configureScreenSaver(_ wallpaper: WEWallpaper, requestedAt: TimeInterval) {
+    private func configureScreenSaver(_ wallpaper: WEWallpaper, requestedAt: TimeInterval,
+                                      requestID: UUID, sourceDisplay: DisplayKey) {
         let runtime = wallpaperViewModel.loadRuntime(for: wallpaper)
         let properties = wallpaperViewModel.effectiveProperties(for: wallpaper, runtime: runtime)
         let fps = Int(AppDelegate.shared.globalSettingsViewModel.settings.fps)
-        var context = ScreenSaverManager.ConfigurationContext(wallpaperID: wallpaper.id, runtime: runtime, fps: fps)
+        var context = ScreenSaverManager.ConfigurationContext(
+            wallpaperID: wallpaper.id, runtime: runtime, fps: fps, sourceDisplay: sourceDisplay)
         context.capturedAt = requestedAt
         let manager = ScreenSaverManager.shared
         let needsInstallation = !manager.isInstalled
@@ -354,7 +360,8 @@ struct ExplorerItemMenu: SubviewOfContentView {
                     runtime: runtime,
                     properties: properties,
                     fps: fps,
-                    context: context
+                    context: context,
+                    requestID: requestID
                 )
             }
             DispatchQueue.main.async {
