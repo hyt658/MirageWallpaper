@@ -1,0 +1,117 @@
+/* Mirage Wallpaper
+ * Copyright © 2026 王孝慈. All rights reserved.
+ * macOS appearance / macOS 外观 / macOS 外觀
+ */
+:root {
+  color-scheme: light;
+  --mw-bg: #f3f3f5; --mw-sidebar: #ececee; --mw-panel: #fafafa;
+  --mw-raised: #fff; --mw-field: #fff; --mw-text: #28282c;
+  --mw-secondary: #737379; --mw-line: #d5d5d9; --mw-hover: #e3e3e8;
+  --mw-accent: #007aff; --mw-selection: #dceaff; --mw-selected-text: #075cc4;
+  --mw-thumb: #a4a4aa; --mw-preview: #dddde1; --mw-shadow: rgba(0,0,0,.18);
+}
+:root[data-mirage-appearance="dark"] {
+  color-scheme: dark;
+  --mw-bg: #202124; --mw-sidebar: #292a2e; --mw-panel: #242529;
+  --mw-raised: #34353a; --mw-field: #35363b; --mw-text: #e9e9ed;
+  --mw-secondary: #a6a6ae; --mw-line: #44454b; --mw-hover: #3d3e44;
+  --mw-accent: #0a84ff; --mw-selection: #204b7e; --mw-selected-text: #e9f3ff;
+  --mw-thumb: #696a73; --mw-preview: #17181b; --mw-shadow: rgba(0,0,0,.4);
+}
+html, body { background: var(--mw-bg)!important; color: var(--mw-text)!important; }
+body, input, textarea, select, button, .tooltip, .popover {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif!important;
+  -webkit-font-smoothing: antialiased;
+}
+body { font-size: 13px; line-height: 1.45; }
+a { color: var(--mw-accent); }
+::selection { background: var(--mw-selection); color: var(--mw-selected-text); }
+/* Keep original window callbacks and draggable title area. */
+.titlebar { height: 38px; background: var(--mw-bg); position: relative; }
+.titlebar .title { font-size: 13px; font-weight: 600; line-height: 38px; padding: 0 95px; color: var(--mw-text); }
+.titlebarBtn { position: absolute; top: 13px; float: none; width: 12px!important; height: 12px!important; min-width: 0; padding: 0!important; border-radius: 50%; border: 1px solid rgba(0,0,0,.13)!important; box-shadow: none!important; line-height: 10px; }
+.titlebarBtn.closeButton { left: 15px; background: #ff5f57!important; }
+.titlebarBtn.windowButton:nth-of-type(2) { left: 55px; background: #28c840!important; }
+.titlebarBtn.windowButton:nth-of-type(3) { left: 35px; background: #febc2e!important; }
+.titlebarBtn>div { opacity: 0; font-size: 8px; color: #3d3030!important; line-height: 10px; }
+.titlebarBtn:hover>div { opacity: .8; }
+.titlebarBtn:disabled { opacity: .45; }
+.titlebarBtn.miniModeBtn { display:none; }
+.filemenu { margin: 0; padding: 0 9px 5px; height: 31px; border-bottom: 1px solid var(--mw-line); }
+.filemenu>.btn-group>.dropdown-toggle { background: transparent!important; color: var(--mw-text)!important; font-size: 12px; padding: 3px 10px; border-radius: 5px!important; }
+.filemenu>.btn-group>.dropdown-toggle:hover { background: var(--mw-hover)!important; }
+.filemenu>.open>.dropdown-toggle { background: var(--mw-accent)!important; color: #fff!important; }
+.filemenu .dropdown-toggle.mirage-menu-open { background: var(--mw-accent)!important; color:#fff!important; }
+.clientArea.hasFilemenu { top: 76px; bottom: 10px; right: 10px; left: 10px; }
+.editorLayoutScene .editorToolbar { height: 36px; padding: 1px 3px 5px; }
+.editorLayoutScene .editorLayoutRoot { top: 38px; }
+.editorToolbarButton { width: 29px; height: 27px; line-height: 27px; font-size: 16px; color: var(--mw-secondary); border-radius: 6px; }
+.editorToolbarButton:hover:not(:disabled) { background: var(--mw-hover); color: var(--mw-text); }
+.editorToolbarButton.active { background: var(--mw-selection); color: var(--mw-accent); box-shadow: none; }
+.editorToolbarSeparator { width: 13px; }
+.editorToolbarSeparator>div { background: var(--mw-line); height: 20px; top: 4px; }
+.editorLayoutPanel, .editorLayoutPanelBackground { background: var(--mw-panel); border-color: var(--mw-line); }
+.editorLayoutPanelBackground { border-radius: 8px; }
+.editorLayoutPanel { border-radius: 0 0 7px 7px; }
+.editorSceneGraphRootContainer { background: var(--mw-sidebar); padding: 5px; }
+.editorLayoutTitleCard, .editorLayoutTitleCard.active { background: transparent; border: 0; color: var(--mw-secondary); font-size: 12px; font-weight: 500; border-radius: 5px 5px 0 0; }
+.editorLayoutTitleCard.active, .editorLayoutTitleCard.active:hover { background: var(--mw-panel); color: var(--mw-text); }
+.editorLayoutTitleCard:hover { background: var(--mw-hover); }
+.editorLayoutTitleCard .panelIcon { font-size: 11px; color: var(--mw-secondary); }
+.editorLayoutTitleCard .closeIcon { background: transparent; color: var(--mw-secondary); width: 14px; height: 14px; font-size: 10px; }
+.editorLayoutTitleCard:hover .closeIcon { background: var(--mw-hover); color: var(--mw-text); }
+.editorLayoutPreview, .previewContainer { background: var(--mw-preview); }
+.editorLayoutDrag:hover { background: var(--mw-line); }
+.editorTreeViewSceneGraphBtn { border-radius: 5px!important; margin: 2px 0; padding: 5px 7px; background: transparent; color: var(--mw-text); }
+.editorTreeViewSceneGraphBtn.active, .editorTreeViewSceneGraphBtn.active:hover { background: var(--mw-selection)!important; color: var(--mw-selected-text)!important; }
+.editorTreeViewSceneGraphBtn.active>.editorTreeViewVisibilityButton { color: var(--mw-selected-text); }
+.editorTreeViewRemoveButton { background: transparent; color: var(--mw-secondary); }
+.editorTreeViewRemoveButton:hover { color: #ff453a; background: var(--mw-hover); }
+.editorSceneGraphRootContainer>div>.btn.fullWidth { background: var(--mw-raised); color: var(--mw-text); border: 1px solid var(--mw-line); margin-bottom: 5px; }
+.editorPropertyPaneProperties { padding: 4px 7px; }
+.editorPropertyRow .propertyRow { font-size: 12px; padding-bottom: 11px; }
+.editorPropertyRow.typeTitleClass .typeNameColumn, .editorPropertyRow.typeTitleEditClass .typeNameColumn { font-size: 16px; font-weight: 600; }
+.editorPropertyRow .keyValueLabel { color: var(--mw-secondary); }
+.editorPropertyRow .typeTitleClass .keyValueLabel { color: var(--mw-text); }
+.editorPropertyRow .nestedScriptGroup, .editorPropertyRow .typeTexture, .editorPropertyRow .typeReadonly { border-color: var(--mw-line); background-color: var(--mw-panel); color: var(--mw-text); }
+.btn, .sp-replacer, .sp-cancel, .sp-container button { font-size: 12px; padding: 4px 10px; border-radius: 6px; box-shadow: none; transition: none; }
+.btn-default, .sp-replacer, .sp-container, .sp-cancel, .input-group-addon, .panel, .well, .list-group-item { color: var(--mw-text)!important; background-color: var(--mw-raised)!important; border-color: var(--mw-line)!important; }
+.btn-default:hover, .btn-default:focus { background: var(--mw-hover)!important; }
+.btn-primary, .btn-info { background: var(--mw-accent); border-color: var(--mw-accent); color: #fff; }
+.btn-primary.active, .btn-primary:active, .btn-primary:focus, .btn-primary:hover { background: var(--mw-accent); color: #fff; filter: brightness(.94); }
+.btn-lg { font-size: 13px; padding: 5px 12px; }
+.btn-sm { padding: 3px 7px; font-size: 11px; }
+.btn:disabled, .btn.disabled { opacity: .4; }
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]), textarea, select, .form-control {
+  color: var(--mw-text)!important; background: var(--mw-field)!important; border: 1px solid var(--mw-line)!important;
+  border-radius: 5px!important; box-shadow: 0 1px 1px rgba(0,0,0,.025); font-size: 12px;
+}
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]), select, .form-control { min-height: 25px; padding: 3px 6px; }
+input:focus, textarea:focus, select:focus, .form-control:focus { outline: none; border-color: var(--mw-accent)!important; box-shadow: 0 0 0 2px var(--mw-selection)!important; }
+input:disabled, textarea:disabled { opacity: .5; }
+input::placeholder, textarea::placeholder { color: var(--mw-secondary)!important; }
+.dropdown-menu, .context-menu, .popover { background: var(--mw-raised)!important; color: var(--mw-text)!important; border: 1px solid var(--mw-line)!important; border-radius: 8px; padding: 5px; box-shadow: 0 7px 22px var(--mw-shadow); }
+.dropdown-menu .btn, .filemenu .dropdown-menu .btn, .dropdown-menu>li>a { background: transparent!important; color: var(--mw-text)!important; border: 0!important; border-radius: 4px; font-size: 12px; padding: 4px 9px; }
+.dropdown-menu .btn:hover, .filemenu .dropdown-menu .btn:hover, .dropdown-menu>li>a:hover { background: var(--mw-accent)!important; color: #fff!important; }
+.filemenu .separator, .dropdown-menu .divider { border-color: var(--mw-line); background: var(--mw-line); margin: 4px 3px; }
+.filemenu .faMenuIcon { font-size: 12px; }
+.modal-content { background: var(--mw-panel); color: var(--mw-text); border-color: var(--mw-line); border-radius: 12px; box-shadow: 0 16px 48px var(--mw-shadow); overflow: hidden; }
+.modal-header, .modal-footer { border-color: var(--mw-line); background: var(--mw-bg); padding: 13px 17px; }
+.modal-title { font-size: 16px; font-weight: 600; }
+.modal-body { color: var(--mw-text); padding: 16px; }
+.modal-backdrop { background: #000; }
+.modal-backdrop.in { opacity: .25; }
+.modal-content h1, .modal-content h2, .modal-content h3, .modal-content h4 { color: var(--mw-text); }
+.nav-tabs { border-color: var(--mw-line); }
+.nav-tabs>li>a { color: var(--mw-secondary); border-radius: 6px 6px 0 0; }
+.nav-tabs>li.active>a, .nav-tabs>li.active>a:hover, .nav-tabs>li.active>a:focus { background: var(--mw-panel); color: var(--mw-text); border-color: var(--mw-line); }
+.table>tbody>tr>td, .table>thead>tr>th, hr { border-color: var(--mw-line); }
+.table-striped>tbody>tr:nth-of-type(odd) { background: var(--mw-hover); }
+.rzslider .rz-bar { background: var(--mw-line); }
+.rzslider .rz-selection, .rzslider .rz-pointer { background: var(--mw-accent); }
+.rzslider .rz-pointer { border-radius: 50%; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar, ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent!important; }
+::-webkit-scrollbar-thumb { border-radius: 8px; background-color: var(--mw-thumb)!important; border: 2px solid transparent; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--mw-secondary)!important; }
+.browseWallpapersWorkshopStatus { display: none!important; }

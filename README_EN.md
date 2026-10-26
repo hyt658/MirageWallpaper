@@ -328,4 +328,6 @@ Before submitting a change, verify at least that:
 
 Mirage is released under [GPL-3.0](LICENSE). Steam service notices are stored in [`SteamService/Licenses`](SteamService/Licenses); all other third-party code and resources remain under their respective licenses. Mirage is not affiliated with or endorsed by Valve, Steam, or Wallpaper Engine.
 
+The standalone editor integration in `StandaloneEditor/` is provided under the proprietary terms in its [README](StandaloneEditor/README.md#许可与商业条款), outside the main project's GPL-3.0 license scope. Wallpaper Engine's proprietary executables, interface code, and resources are not included in this repository.
+
 Optional sign-in-free Workshop downloads are disabled by default and require a device-specific activation code in Settings → General. This mode supports downloads only, without Steam subscriptions, favorites or comments. Its independent helper is not included in this open-source repository; builds without it retain normal Steam downloads. Release builds can supply a precompiled component using `MIRAGE_DIRECT_WORKSHOP_BUNDLE`. Do not include private source or activation signing material in this repository.

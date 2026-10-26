@@ -328,4 +328,6 @@ VideoRenderer/build/release/Tools/VideoViewer/VideoViewer <video-wallpaper-direc
 
 Mirage 使用 [GPL-3.0](LICENSE) 发布。Steam 服务相关第三方声明位于 [`SteamService/Licenses`](SteamService/Licenses)，其余第三方代码与资源继续遵循各自许可证。Mirage 与 Valve、Steam 或 Wallpaper Engine 没有关联，也未获得其官方认可。
 
+`StandaloneEditor/` 中的独立编辑器适配代码按其 [README](StandaloneEditor/README.md#许可与商业条款) 所述专有条款提供，不属于主项目的 GPL-3.0 授权范围。Wallpaper Engine 的专有程序、界面代码及资源不包含在本仓库中。
+
 可选的免登录工坊下载默认关闭，需要在「设置 → 通用」输入本机专用激活码。该模式仅支持下载，不支持 Steam 订阅、收藏或评论。其独立辅助组件不包含在本开源仓库中；未提供该组件的构建仍可正常使用 Steam 下载。发布构建通过 `MIRAGE_DIRECT_WORKSHOP_BUNDLE` 指定预编译组件目录，勿将私有源码或激活签发材料加入仓库。

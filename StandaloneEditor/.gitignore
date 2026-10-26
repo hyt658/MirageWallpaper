@@ -1,0 +1,8 @@
+/runtime/
+/Mirage Editor.app/
+/Projects/
+# Legacy UI manifests contain proprietary upstream interface code.
+/src/ui-patches.json
+__pycache__/
+*.pyc
+.DS_Store
