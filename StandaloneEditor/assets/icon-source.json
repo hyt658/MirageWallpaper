@@ -1,0 +1,21 @@
+{
+  "tool": "image_gen (built-in)",
+  "asset": "MirageEditor.png",
+  "reference": "Mirage/Mirage Wallpaper/Resources/Assets.xcassets/AppIcon.appiconset/icon_1024.png",
+  "generation_prompt": "Use case: logo-brand, precise icon edit.\nEdit the supplied Mirage application icon into a distinct sibling application icon for \"Mirage Editor\", a macOS wallpaper and scene creation tool.\n\nPreserve the input's exact 1024 by 1024 square RGBA canvas and its macOS rounded-square silhouette. The existing outer silhouette occupies x=99 through 924 and y=99 through 924; preserve this overall visible size. Keep roughly 99 fully transparent pixels of clear padding on ALL FOUR sides, about 9.7 percent per side. Preserve rounded transparent corner cutouts. Nothing, including shadows, glow, badges or a pen tip, may extend into that transparent outer padding. Do not crop or enlarge the icon.\n\nKeep the refined dimensional glass/enamel style, soft bevels, saturated blue-to-cyan frame, deep blue and indigo interior, and restrained violet/magenta accents of the reference. Retain a subtle connection to its window-like framing, but create a clearly different interior composition.\n\nReplace the entire central M, sunset, sun, water and rolling landscape with a clean, bold editor emblem: a single large luminous ivory and pale-cyan precision pen nib tilted diagonally over two overlapping translucent artboard/layer planes. Beneath the nib, one elegant cyan-to-magenta Bezier curve with only two clearly shaped square anchor points communicates visual editing. Use a strong simple silhouette, clean geometry and excellent legibility at Dock sizes. Keep the composition centered and visually balanced within the existing frame. A little magenta on the lower glass layer ties it to the Mirage family.\n\nThe final result must look like a polished standalone native macOS app icon, not a mockup, screenshot, badge sheet or a decorated copy of the old landscape icon. No letters, no words, no watermark, no extra icons, no outer white or colored background. Output one icon only, with a genuinely transparent alpha background and unchanged transparent padding.",
+  "cleanup_prompt": "Precise alpha-edge cleanup of image 1 only. Preserve the existing pen-nib and layered-artboard icon design, colors, material, lighting, composition and subject size exactly. Image 2 is ONLY the clean silhouette and transparent-margin reference.\n\nRemove ALL disconnected colored specks, tiny blue/magenta/white fringes and faint stray semi-transparent pixels outside the rounded-square icon. Remove external glow and any external shadow. The outside background, the complete approximately 9.7% outer margin on every side, and the rounded-corner cutouts must be pure alpha=0, not black, white, a checkerboard, or faint colored alpha noise. Keep a crisp clean antialiased boundary immediately on the rounded-square silhouette. Do not paint a background.\n\nMatch the overall silhouette and canvas occupancy of reference image 2: centered square icon, body about 80.7% of the full square canvas width and height. All pen and artboard elements remain clipped inside the tile. Deliver a single polished RGBA app icon with genuinely empty transparent padding, preferably on a 1024x1024 canvas. No text or other design changes.",
+  "export": {
+    "canvas": [
+      1024,
+      1024
+    ],
+    "visible_bounds": [
+      99,
+      99,
+      925,
+      925
+    ],
+    "transparent_margin_pixels": 99,
+    "description": "Exported with native CoreGraphics to the existing macOS icon canvas and alpha silhouette; the generated illustration is preserved."
+  }
+}

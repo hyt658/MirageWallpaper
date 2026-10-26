@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import plistlib
 from pathlib import Path
 
 from patch_native_preview import patch
@@ -25,6 +26,16 @@ def verify():
     for path in required:
         if not path.is_file():
             raise ValueError('Missing runtime file: ' + str(path))
+    icon = (RUNTIME / 'MirageEditor.icns').read_bytes()
+    if not icon.startswith(b'icns'):
+        raise ValueError('Invalid editor icon package')
+    for bundle in [PROJECT / 'Mirage Editor.app', RUNTIME / 'Mirage WE Editor.app',
+                   RUNTIME / 'Mirage Project Picker.app']:
+        if (bundle / 'Contents/Resources/MirageEditor.icns').read_bytes() != icon:
+            raise ValueError('Editor icon differs: ' + str(bundle))
+        info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+        if info.get('CFBundleIconFile') != 'MirageEditor.icns':
+            raise ValueError('Editor icon is not selected: ' + str(bundle))
 
     expected, manifest = patch((RUNTIME / 'originals/wallpaperui.exe').read_bytes())
     if (RUNTIME / 'windows/WallpaperEngine/bin/wallpaperui.exe').read_bytes() != expected:

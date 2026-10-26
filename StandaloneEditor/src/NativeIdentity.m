@@ -86,7 +86,7 @@ static void installIdentity(unsigned attempt) {
             dispatch_get_main_queue(), ^{ installIdentity(attempt + 1); });
         return;
     }
-    NSString *icon = [NSBundle.mainBundle pathForResource:@"Mirage" ofType:@"icns"];
+    NSString *icon = [NSBundle.mainBundle pathForResource:@"MirageEditor" ofType:@"icns"];
     mirageIcon = [[NSImage alloc] initWithContentsOfFile:icon];
     if (mirageIcon) {
         originalIcon = method_setImplementation(class_getInstanceMethod(NSApplication.class,

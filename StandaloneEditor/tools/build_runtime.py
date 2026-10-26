@@ -5,11 +5,13 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 from patch_native_preview import patch
+from build_icon import build_icon
 
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / 'src'
@@ -57,6 +59,7 @@ def main():
     headers = existing([os.environ.get('MIRAGE_VULKAN_HEADERS')] + [p for c in cellar for p in c.glob('vulkan-headers/*/include')])
     with tempfile.TemporaryDirectory(prefix='mirage-build-') as directory:
         output = Path(directory)
+        build_icon(output / 'MirageEditor.icns')
         def run(*command):
             subprocess.run([str(x) for x in command], check=True)
         run(llvm, '--target=x86_64-w64-windows-gnu', '--sysroot=' + str(winroot), '-I' + headers,
@@ -82,9 +85,20 @@ def main():
             'ProjectPicker': runtime / 'Mirage Project Picker.app/Contents/MacOS/ProjectPicker',
             'scripts.js': runtime / 'windows/WallpaperEngine/ui/dist/scripts/scripts.js',
             'wallpaperui.exe': runtime / 'windows/WallpaperEngine/bin/wallpaperui.exe',
+            'MirageEditor.icns': runtime / 'MirageEditor.icns',
         }
         for name, target in targets.items():
             install(output / name, target)
+        for bundle in [PROJECT / 'Mirage Editor.app', runtime / 'Mirage WE Editor.app',
+                       runtime / 'Mirage Project Picker.app']:
+            install(output / 'MirageEditor.icns', bundle / 'Contents/Resources/MirageEditor.icns')
+            info_path = bundle / 'Contents/Info.plist'
+            info = plistlib.loads(info_path.read_bytes())
+            info['CFBundleIconFile'] = 'MirageEditor.icns'
+            temporary = info_path.with_name('Info.plist.mirage-new')
+            temporary.write_bytes(plistlib.dumps(info, sort_keys=False))
+            os.replace(temporary, info_path)
+            os.utime(bundle, None)
         for name, target in {
             'standalone.js': runtime / 'windows/WallpaperEngine/ui/dist/scripts/mirage-standalone.js',
             'macos.css': runtime / 'windows/WallpaperEngine/ui/dist/styles/macos.css',

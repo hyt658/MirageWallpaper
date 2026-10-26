@@ -1,5 +1,7 @@
 # Mirage Editor
 
+<img src="assets/MirageEditor.png" alt="Mirage Editor" width="128" height="128">
+
 面向 macOS 的独立壁纸编辑器，基于 Wallpaper Engine 编辑器组件与 Wine、DXVK、MoltenVK 运行环境，提供壁纸工程编辑、实时 GPU 预览和 macOS 界面集成。
 
 **Mirage Editor 为闭源专有软件，独立于 Mirage Wallpaper 主项目的开源授权管理。使用本编辑器必须合法持有 Wallpaper Engine 授权，并遵守相关商业许可条款。**
@@ -39,6 +41,7 @@
 StandaloneEditor/
 ├── Mirage Editor.app       macOS 应用入口
 ├── Projects/               本地壁纸工程
+├── assets/                 编辑器图标与生成记录
 ├── src/                    自有适配层源码与配置
 ├── tools/                  内部构建、启动和校验工具
 ├── runtime/                编辑器组件与运行环境

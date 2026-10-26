@@ -130,7 +130,7 @@ final class NativeBridge: NSObject, NSApplicationDelegate {
                 let version = chinese ? (traditional ? "版本 0.1 · 預覽版" : "版本 0.1 · 预览版") : "Version 0.1 · Preview"
                 let description = chinese ? (traditional ? "獨立壁紙編輯器" : "独立壁纸编辑器") : "Standalone wallpaper editor"
                 alert.informativeText = "\(version)\n\n\(description)\n\nCopyright © 2026 王孝慈.\nAll rights reserved."
-                alert.icon = NSImage(contentsOf: self.root.appendingPathComponent("Mirage.icns"))
+                alert.icon = NSImage(contentsOf: self.root.appendingPathComponent("MirageEditor.icns"))
                 alert.addButton(withTitle: chinese ? (traditional ? "好" : "好") : "OK")
                 NSApp.activate(ignoringOtherApps: true)
                 alert.runModal()
